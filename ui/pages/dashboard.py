@@ -69,7 +69,7 @@ def _create_block(actor) -> None:
         )
         columns = st.columns(2)
         with columns[0]:
-            if st.button("Create contract", type="primary", use_container_width=True):
+            if st.button("Create contract", type="primary", width="stretch"):
                 try:
                     contract_id = contract_service.create_contract(
                         title, _parse_sections(sections_raw), _parse_stakeholders(stakeholders_raw), actor
@@ -81,7 +81,7 @@ def _create_block(actor) -> None:
                     st.success(f"Contract created: {contract_id}")
                     st.rerun()
         with columns[1]:
-            if st.button("Load demo contract", use_container_width=True):
+            if st.button("Load demo contract", width="stretch"):
                 contract_id = contract_service.create_contract(
                     "Master Service Agreement",
                     _parse_sections(DEFAULT_SECTIONS),
@@ -100,21 +100,21 @@ def _flow_block(contract_id: str, contract: dict, actor) -> None:
     with columns[0]:
         if status == DRAFT:
             if can_admin(actor):
-                if st.button("Submit for review → IN_REVIEW", use_container_width=True):
+                if st.button("Submit for review → IN_REVIEW", width="stretch"):
                     run_action(contract_service.submit_for_review, contract_id, actor, message="Moved to IN_REVIEW")
             else:
                 st.caption("Waiting for an Admin to submit for review")
     with columns[1]:
         if status == IN_REVIEW:
             if can_review(actor):
-                if st.button("Submit for approval → PENDING_APPROVAL", use_container_width=True):
+                if st.button("Submit for approval → PENDING_APPROVAL", width="stretch"):
                     run_action(approval_service.submit_for_approval, contract_id, actor, message="Submitted for multi-party approval")
             else:
                 st.caption("Waiting for an Approver to submit for approval")
     with columns[2]:
         if status == APPROVED:
             if can_admin(actor):
-                if st.button("Lock contract → LOCKED", type="primary", use_container_width=True):
+                if st.button("Lock contract → LOCKED", type="primary", width="stretch"):
                     run_action(contract_service.lock_contract, contract_id, actor, message="Contract locked; the body is now immutable")
             else:
                 st.caption("Waiting for an Admin to lock the contract")
@@ -156,7 +156,7 @@ def render() -> None:
             }
             for row in rows
         ]
-        st.dataframe(display, hide_index=True, use_container_width=True)
+        st.dataframe(display, hide_index=True, width="stretch")
         st.caption("Select a contract and an identity in the sidebar.")
 
     contract_id, actor, contract, stakeholders = get_context()

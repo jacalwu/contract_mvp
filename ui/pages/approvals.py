@@ -65,7 +65,7 @@ def render() -> None:
             }
             for row in rows
         ]
-        st.dataframe(table, hide_index=True, use_container_width=True)
+        st.dataframe(table, hide_index=True, width="stretch")
 
     can_decide = can_review(actor) and contract["status"] == PENDING_APPROVAL
     for row in rows:

@@ -228,7 +228,7 @@ def render_reviewer_manager(
             key="reviewer_role",
             help="Approvers can approve and review change requests; Stakeholders can comment and clarify. Both can comment.",
         )
-        if columns[3].button("Add reviewer", key="reviewer_add", use_container_width=True):
+        if columns[3].button("Add reviewer", key="reviewer_add", width="stretch"):
             st.session_state["reviewers_panel_open"] = True
             run_action(
                 contract_service.add_stakeholder,

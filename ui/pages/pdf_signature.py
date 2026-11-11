@@ -45,7 +45,7 @@ def _pdf_block(contract_id: str, contract: dict, actor) -> None:
             ["auto", "weasyprint", "playwright", "headless", "minimal"],
             help="auto tries WeasyPrint → Playwright → Chrome/Edge headless → built-in minimal PDF engine",
         )
-        if columns[1].button("Generate final PDF", type="primary", use_container_width=True):
+        if columns[1].button("Generate final PDF", type="primary", width="stretch"):
             try:
                 result = pdf_service.generate_pdf(contract_id, actor, engine=engine)
             except DomainError as exc:
@@ -82,7 +82,7 @@ def _pdf_block(contract_id: str, contract: dict, actor) -> None:
                     file_name=path.name,
                     mime="application/pdf",
                     key=f"download_{row['pdf_id']}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 columns[3].caption("File missing")
@@ -105,7 +105,7 @@ def _signature_block(contract_id: str, contract: dict, actor, provider: str) -> 
                 pid,
             ),
         )
-        if columns[1].button("Send for signature → SIGNING", type="primary", use_container_width=True):
+        if columns[1].button("Send for signature → SIGNING", type="primary", width="stretch"):
             run_action(
                 signing_service.send_for_signature,
                 contract_id,
@@ -128,7 +128,7 @@ def _signature_block(contract_id: str, contract: dict, actor, provider: str) -> 
             }
             for row in signatures
         ]
-        st.dataframe(table, hide_index=True, use_container_width=True)
+        st.dataframe(table, hide_index=True, width="stretch")
         for row in signatures:
             if row["status"] != SIGNATURE_PENDING:
                 continue
