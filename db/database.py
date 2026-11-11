@@ -25,8 +25,35 @@ def get_conn() -> duckdb.DuckDBPyConnection:
                 for statement in _SCHEMA_SQL.split(";"):
                     if statement.strip():
                         con.execute(statement)
+                _migrate(con)
                 _conn = con
     return _conn
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS cannot add them
+# to an existing database, so they are applied idempotently on connect.
+_MIGRATIONS = (
+    ("stakeholders", "color", "VARCHAR"),
+    ("comments", "anchor_start", "INTEGER"),
+    ("comments", "anchor_end", "INTEGER"),
+    ("comments", "quoted_text", "VARCHAR"),
+    ("comments", "color", "VARCHAR"),
+    ("comments", "resolved_at", "TIMESTAMP"),
+)
+
+
+def _migrate(con: duckdb.DuckDBPyConnection) -> None:
+    for table, column, sql_type in _MIGRATIONS:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {sql_type}")
+    # give reviewers created before colours existed a stable swatch
+    rows = con.execute(
+        "SELECT stakeholder_id FROM stakeholders WHERE color IS NULL ORDER BY contract_id, created_at, email"
+    ).fetchall()
+    for index, (stakeholder_id,) in enumerate(rows):
+        con.execute(
+            "UPDATE stakeholders SET color = ? WHERE stakeholder_id = ?",
+            [config.REVIEW_PALETTE[index % len(config.REVIEW_PALETTE)], stakeholder_id],
+        )
 
 
 def sql(con: duckdb.DuckDBPyConnection, statement: str, params: Sequence[Any] = ()):

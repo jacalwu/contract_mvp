@@ -202,8 +202,12 @@ def render_reviewer_manager(
                 if party["role"] == ROLE_APPROVER
                 else "Stakeholder - comments & clarifies"
             )
+            swatch = (
+                f"<span style='display:inline-block;width:10px;height:10px;border-radius:50%;"
+                f"background:{html.escape(str(party['color'] or '#9ca3af'))};margin-right:5px'></span>"
+            )
             st.markdown(
-                f"- **{html.escape(str(party['name']))}** · {html.escape(str(party['email']))} "
+                f"- {swatch}**{html.escape(str(party['name']))}** · {html.escape(str(party['email']))} "
                 f"· `{party['role']}` — {capability}"
             )
 
@@ -257,4 +261,41 @@ def render_reviewer_manager(
                     remove_id,
                     actor,
                     message="Reviewer removed",
+                )
+
+            st.divider()
+            st.caption(
+                "Annotation colour: each reviewer writes in their own colour, which is how the document "
+                "tells comments apart."
+            )
+            color_columns = st.columns([2, 2, 1])
+            color_target = color_columns[0].selectbox(
+                "Reviewer",
+                [row["stakeholder_id"] for row in stakeholders],
+                format_func=lambda sid: next(
+                    (row["name"] for row in stakeholders if row["stakeholder_id"] == sid), sid
+                ),
+                key="reviewer_color_target",
+            )
+            current_color = next(
+                (row["color"] for row in stakeholders if row["stakeholder_id"] == color_target),
+                config.REVIEW_PALETTE[0],
+            )
+            palette = list(config.REVIEW_PALETTE)
+            new_color = color_columns[1].selectbox(
+                "Colour",
+                palette,
+                index=palette.index(current_color) if current_color in palette else 0,
+                format_func=lambda value: config.PALETTE_LABELS.get(value, value),
+                key="reviewer_color_value",
+            )
+            if color_columns[2].button("Apply", key="reviewer_color_apply", width="stretch"):
+                st.session_state["reviewers_panel_open"] = True
+                run_action(
+                    contract_service.set_stakeholder_color,
+                    contract_id,
+                    color_target,
+                    new_color,
+                    actor,
+                    message="Annotation colour updated",
                 )

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import config
 from core.audit import log_event
 from core.constants import (
     APPROVAL_PENDING,
@@ -14,6 +15,7 @@ from core.constants import (
     E_CONTRACT_LOCKED,
     E_REVIEW_STARTED,
     E_STAKEHOLDER_ADDED,
+    E_STAKEHOLDER_COLOR_SET,
     E_STAKEHOLDER_REMOVED,
     IN_REVIEW,
     ROLE_ADMIN,
@@ -95,13 +97,21 @@ def create_contract(
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 [new_id("SEC"), contract_id, section_title, content, position, timestamp],
             )
-        for name, email, role in clean_stakeholders:
+        for index, (name, email, role) in enumerate(clean_stakeholders):
             stakeholder_id = new_id("STK")
             sql(
                 con,
-                """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                [stakeholder_id, contract_id, name, email, role, timestamp],
+                """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, color, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    stakeholder_id,
+                    contract_id,
+                    name,
+                    email,
+                    role,
+                    config.REVIEW_PALETTE[index % len(config.REVIEW_PALETTE)],
+                    timestamp,
+                ],
             )
             sql(
                 con,
@@ -185,7 +195,9 @@ def list_signatures(contract_id: str) -> list[dict]:
     )
 
 
-def add_stakeholder(contract_id: str, name: str, email: str, role: str, actor: Actor) -> str:
+def add_stakeholder(
+    contract_id: str, name: str, email: str, role: str, actor: Actor, color: str | None = None
+) -> str:
     require_role(actor, {ROLE_ADMIN}, "Manage stakeholders")
     contract = get_contract(contract_id)
     # Reviewers may join while the contract is still being negotiated (including
@@ -202,12 +214,17 @@ def add_stakeholder(contract_id: str, name: str, email: str, role: str, actor: A
         raise DomainError(f"Stakeholder email already exists: {email}")
 
     stakeholder_id = new_id("STK")
+    used = {row["color"] for row in fetch_all("SELECT color FROM stakeholders WHERE contract_id = ?", [contract_id]) if row["color"]}
+    palette = [color for color in config.REVIEW_PALETTE if color not in used] or list(config.REVIEW_PALETTE)
+    color = color or palette[0]
+    if color not in config.REVIEW_PALETTE:
+        raise DomainError("Unknown annotation colour.")
     with tx() as con:
         sql(
             con,
-            """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [stakeholder_id, contract_id, name, email, role, now()],
+            """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, color, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [stakeholder_id, contract_id, name, email, role, color, now()],
         )
         sql(
             con,
@@ -221,12 +238,38 @@ def add_stakeholder(contract_id: str, name: str, email: str, role: str, actor: A
             actor=actor,
             event_type=E_STAKEHOLDER_ADDED,
             target_id=stakeholder_id,
-            after_value={"name": name, "email": email, "role": role, "approval": APPROVAL_PENDING},
+            after_value={"name": name, "email": email, "role": role, "color": color, "approval": APPROVAL_PENDING},
         )
         # A new reviewer always starts with a PENDING approval, which keeps the
         # approval gate honest; re-evaluate in case the roster changed mid-approval.
         evaluate_contract_approval(con, contract_id, actor)
     return stakeholder_id
+
+
+def set_stakeholder_color(contract_id: str, stakeholder_id: str, color: str, actor: Actor) -> None:
+    """Admins can re-assign a reviewer's annotation colour at any time."""
+    require_role(actor, {ROLE_ADMIN}, "Manage stakeholders")
+    if color not in config.REVIEW_PALETTE:
+        raise DomainError("Unknown annotation colour.")
+    row = fetch_one(
+        "SELECT * FROM stakeholders WHERE contract_id = ? AND stakeholder_id = ?",
+        [contract_id, stakeholder_id],
+    )
+    if row is None:
+        raise DomainError("Stakeholder not found.")
+    if row["color"] == color:
+        return
+    with tx() as con:
+        sql(con, "UPDATE stakeholders SET color = ? WHERE stakeholder_id = ?", [color, stakeholder_id])
+        log_event(
+            con,
+            contract_id=contract_id,
+            actor=actor,
+            event_type=E_STAKEHOLDER_COLOR_SET,
+            target_id=stakeholder_id,
+            before_value={"color": row["color"]},
+            after_value={"color": color},
+        )
 
 
 def remove_stakeholder(contract_id: str, stakeholder_id: str, actor: Actor) -> None:

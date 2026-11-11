@@ -25,7 +25,7 @@ os.environ["MVP_PDF_ENGINE"] = "auto"
 
 import pytest  # noqa: E402
 
-from core import approvals, changes, contracts, discussions, pdf, signing  # noqa: E402
+from core import approvals, changes, contracts, discussions, export, pdf, review, signing  # noqa: E402
 from core.audit import list_events  # noqa: E402
 from core.constants import (  # noqa: E402
     APPROVED,
@@ -337,3 +337,99 @@ def test_removing_pending_reviewer_re_evaluates_approval():
     contracts.remove_stakeholder(contract_id, dana_id, ADMIN)
     assert get_contract(contract_id)["status"] == APPROVED
     assert len(approvals.list_approvals(contract_id)) == 3
+
+
+def test_inline_annotations_are_anchored_coloured_and_exported():
+    """Inline review: selection offsets, per-reviewer colours, replies, resolve and exports."""
+    contract_id = contracts.create_contract("Annotated Agreement", SECTIONS, STAKEHOLDERS, ADMIN)
+    reviewers = contracts.list_stakeholders(contract_id)
+    colours = [row["color"] for row in reviewers]
+    assert len(set(colours)) == len(colours), "each reviewer needs a distinct annotation colour"
+
+    section = contracts.list_sections(contract_id)[1]
+    content = section["content"]
+    start, end = 0, len("Payment within 30 days.")
+    assert content[start:end] == "Payment within 30 days."
+
+    comment_id = discussions.add_comment(
+        contract_id,
+        section["section_id"],
+        "Should this be 45 days?",
+        _actors(contract_id)[0],
+        anchor_start=start,
+        anchor_end=end,
+        quoted_text=content[start:end],
+        color=colours[1],
+    )
+    stored = next(row for row in contracts.list_comments(contract_id) if row["comment_id"] == comment_id)
+    assert (stored["anchor_start"], stored["anchor_end"]) == (start, end)
+    assert stored["quoted_text"] == "Payment within 30 days."
+    assert stored["color"] == colours[1]
+
+    reply_id = discussions.add_comment(
+        contract_id, section["section_id"], "Legal prefers 45.", _actors(contract_id)[1], parent_comment_id=comment_id
+    )
+    reply = next(row for row in contracts.list_comments(contract_id) if row["comment_id"] == reply_id)
+    assert (reply["anchor_start"], reply["anchor_end"]) == (start, end), "replies inherit the parent anchor"
+
+    # stale or out-of-range anchors must be rejected instead of highlighting the wrong words
+    with pytest.raises(DomainError):
+        discussions.add_comment(
+            contract_id, section["section_id"], "stale", ADMIN, anchor_start=start, anchor_end=end, quoted_text="Payment within 60 days."
+        )
+    with pytest.raises(DomainError):
+        discussions.add_comment(contract_id, section["section_id"], "oob", ADMIN, anchor_start=0, anchor_end=len(content) + 5)
+    with pytest.raises(DomainError):
+        discussions.add_comment(contract_id, section["section_id"], "bad colour", ADMIN, color="#123456")
+
+    discussions.set_resolved(comment_id, True, ADMIN)
+    resolved = next(row for row in contracts.list_comments(contract_id) if row["comment_id"] == comment_id)
+    assert resolved["resolved_at"] is not None
+    discussions.set_resolved(comment_id, False, ADMIN)
+    assert next(row for row in contracts.list_comments(contract_id) if row["comment_id"] == comment_id)["resolved_at"] is None
+
+    payload = review.build_payload(contract_id, ADMIN)
+    annotation = next(item for item in payload["annotations"] if item["id"] == comment_id)
+    assert (annotation["start"], annotation["end"]) == (start, end)
+    assert annotation["color"] == colours[1]
+    assert len(annotation["replies"]) == 1
+    assert payload["can_annotate"] and payload["can_propose"]
+
+    markdown = export.build_markdown(contract_id, ADMIN)
+    assert "[^1]" in markdown and "Should this be 45 days?" in markdown
+    printable = export.build_print_html(contract_id, ADMIN)
+    assert 'class="ann"' in printable and "Comments" in printable
+    assert "Should this be 45 days?" in printable
+
+
+def test_tracked_change_marks_author_and_time_and_appears_in_exports():
+    """Merged changes leave a Word-like mark naming the editor and the moment."""
+    contract_id = contracts.create_contract("Tracked Agreement", SECTIONS, STAKEHOLDERS, ADMIN)
+    section = contracts.list_sections(contract_id)[1]
+    before = section["content"]
+    after = "Payment within 45 days of invoice."
+    change_id = changes.propose_change(contract_id, section["section_id"], OP_UPDATE, before, after, ADMIN)
+
+    payload = review.build_payload(contract_id, ADMIN)
+    change = next(item for item in payload["changes"] if item["id"] == change_id)
+    assert change["status"] == "PENDING"
+    assert any(op["op"] == "ins" for op in change["diff"])
+    assert any(op["op"] == "del" for op in change["diff"])
+    assert payload["revisions"] == {}, "nothing is merged yet"
+
+    changes.review_change(change_id, True, ADMIN)
+    changes.merge_change(change_id, ADMIN)
+
+    payload = review.build_payload(contract_id, ADMIN)
+    marks = payload["revisions"][section["section_id"]]
+    assert marks, "merged change should be located in the document"
+    assert marks[0]["author"] == ADMIN.name
+    assert "Revised by" in marks[0]["label"]
+    assert payload["contract"]["version"] == 2
+
+    markdown = export.build_markdown(contract_id, ADMIN)
+    assert "## Change history" in markdown
+    assert "45 days of invoice" in markdown  # the body carries the merged text
+    assert "| Payment Terms | UPDATE | Admin |" in markdown
+    printable = export.build_print_html(contract_id, ADMIN)
+    assert "45 days of invoice" in printable

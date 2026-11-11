@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS stakeholders (
     name VARCHAR NOT NULL,
     email VARCHAR NOT NULL,
     role VARCHAR NOT NULL,               -- STAKEHOLDER | APPROVER
+    color VARCHAR,                       -- + annotation colour used for this reviewer
     created_at TIMESTAMP NOT NULL
 );
 
@@ -34,6 +35,11 @@ CREATE TABLE IF NOT EXISTS comments (
     author_id VARCHAR NOT NULL,
     message TEXT NOT NULL,
     parent_comment_id VARCHAR,           -- + threaded replies
+    anchor_start INTEGER,                -- + inline annotation: character offset (inclusive)
+    anchor_end INTEGER,                  -- + inline annotation: character offset (exclusive)
+    quoted_text VARCHAR,                 -- + annotated fragment, used to re-anchor / verify
+    color VARCHAR,                       -- + colour chosen by the author
+    resolved_at TIMESTAMP,               -- + annotation can be resolved without deleting
     created_at TIMESTAMP NOT NULL
 );
 

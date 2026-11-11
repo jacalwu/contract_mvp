@@ -21,6 +21,7 @@ from core.pdf import _browser_candidates  # noqa: E402
 BASE_URL = os.getenv("MVP_SMOKE_URL", "http://127.0.0.1:8501").rstrip("/")
 PAGES = [
     ("Dashboard", "dashboard"),
+    ("Document Review", "document-review"),
     ("Contract Viewer", "viewer"),
     ("Change Requests", "changes"),
     ("Approvals", "approvals"),
@@ -128,7 +129,7 @@ def main() -> int:
         for failure in failures:
             print(" -", failure)
         return 1
-    print("\nSMOKE PASSED: all 6 pages + creation + comment interaction")
+    print("\nSMOKE PASSED: all pages + creation + reviewer + comment interaction")
     return 0
 
 
