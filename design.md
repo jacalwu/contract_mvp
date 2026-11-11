@@ -204,7 +204,10 @@ After:
 Change Tracking
 Every modification creates a Change Request.
 
-Nothing is edited directly.
+Stakeholders propose changes via Change Requests (tracked changes). Admin/Approver may also
+apply direct edits while the contract is in DRAFT or IN_REVIEW — these are recorded as a
+MERGED change, bump the version and leave an in-document revision mark, so the audit trail
+and PDF export stay consistent with proposed changes.
 
 Workflow:
 
@@ -253,6 +256,25 @@ Example:
 
 - Payment within 30 days.
 + Payment within 45 days.
+
+In-Document Revision Marks
+Merged changes are highlighted inline in the document body, not only in a side panel.
+Each revised span carries the author and timestamp, e.g. "Revised by Admin on 2026-11-11",
+so reviewers immediately see who changed what and when.
+
+Document Rendering Model
+Section content is stored as plain text using a Markdown-lite subset:
+
+# H1 / ## H2 / ### H3 headings
+- bullet lists and 1. numbered lists
+> block quotes
+| a | b | tables (first row is the header)
+--- horizontal rules
+Inline: **bold**, *italic*, ++underline++, ~~strike~~, `code`
+
+A plain-text projection (markup stripped) is used for anchoring comments and diffs, so
+adding formatting never shifts existing annotation anchors. Legacy plain-text sections
+project byte-for-byte to their original content (backward compatible).
 Stakeholder Approval
 Database:
 
@@ -404,6 +426,12 @@ SIGNATURE_REQUESTED
 SIGNATURE_COMPLETED
 
 CONTRACT_EXECUTED
+
+SECTION_EDITED
+SECTION_ADDED
+SECTION_REMOVED
+SECTION_MOVED
+SECTION_RENAMED
 Activity Timeline
 UI should include a Timeline page.
 
@@ -483,6 +511,33 @@ Insert
 Update
 Delete
 Diff View
+
+Document Review
+The primary review surface. Renders the contract as a print-ready document (Markdown-lite)
+rather than a form, and hosts inline collaboration:
+
+Displays:
+
+Printable document with headings, lists, tables, quotes
+Inline annotations anchored to selected text (each stakeholder gets a distinct color)
+Threaded replies inside the annotation popover
+Tracked changes with insert/delete marks and author
+Merged revisions highlighted in the body ("Revised by X on ...")
+Line numbers in the document gutter
+
+Supports (Edit mode):
+
+Paragraph styles (Body / Title / Heading 1-2 / Quote)
+Bold, Italic, Underline, Strikethrough
+Bullet and numbered lists
+Insert table (grid picker)
+Horizontal rule
+Clear formatting, undo / redo
+Save changes (only changed sections submitted; optimistic lock guards concurrent edits)
+Add / rename / move / delete section
+
+Print / PDF export of the annotated document.
+
 Approvals
 Displays:
 
