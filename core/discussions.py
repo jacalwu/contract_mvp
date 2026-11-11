@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import config
 from core.audit import log_event
+from core import richtext
 from core.constants import (
     CLARIFICATION_ANSWERED,
     CLARIFICATION_CLOSED,
@@ -73,9 +74,10 @@ def _validate_anchor(
     except (TypeError, ValueError):
         raise DomainError("Annotation offsets must be integers.") from None
     content = section["content"] or ""
-    if start < 0 or end <= start or end > len(content):
+    body = richtext.plain(content)
+    if start < 0 or end <= start or end > len(body):
         raise DomainError("The selected range is outside the section text; re-select and try again.")
-    actual = content[start:end]
+    actual = body[start:end]
     if quoted_text is not None and str(quoted_text) != actual:
         raise DomainError("The document changed while you were annotating; reload and re-select the text.")
     return start, end, actual

@@ -11,6 +11,7 @@ import streamlit as st
 import config
 from core import changes as change_service
 from core import discussions as discussion_service
+from core import editing as editing_service
 from core import export as export_service
 from core.constants import DomainError
 from core.review import build_payload
@@ -49,15 +50,36 @@ def _handle_event(event: dict, contract_id: str, actor) -> None:
             discussion_service.set_resolved(event.get("comment_id"), bool(event.get("resolved")), actor)
         elif action == "delete_comment":
             discussion_service.delete_comment(event.get("comment_id"), actor)
-        elif action == "propose_change":
-            change_service.propose_change(
+        elif action == "apply_range":
+            result = editing_service.apply_range(
                 contract_id,
                 event.get("section_id"),
-                event.get("operation"),
-                event.get("before_content", ""),
-                event.get("after_content", ""),
+                int(event.get("start") or 0),
+                int(event.get("end") or 0),
+                event.get("replacement", ""),
                 actor,
             )
+            st.session_state["review_flash"] = (
+                "Edit submitted as a tracked change — an approver can accept and merge it."
+                if result["mode"] == "tracked"
+                else f"Clause updated (v{result.get('version', '')})."
+            )
+        elif action == "save_edits":
+            _save_edits(event, contract_id, actor)
+        elif action == "add_section":
+            editing_service.add_section(
+                contract_id, event.get("after_section_id"), "New section", "", actor
+            )
+            st.session_state["review_flash"] = "Section added — give it a title and text."
+        elif action == "delete_section":
+            editing_service.delete_section(event.get("section_id"), actor)
+            st.session_state["review_flash"] = "Section removed."
+        elif action == "move_section":
+            editing_service.move_section(
+                event.get("section_id"), int(event.get("direction") or 1), actor
+            )
+        elif action == "rename_section":
+            editing_service.rename_section(event.get("section_id"), event.get("title", ""), actor)
         elif action == "review_change":
             change_service.review_change(event.get("change_id"), bool(event.get("accept")), actor)
         elif action == "merge_change":
@@ -74,6 +96,37 @@ def _handle_event(event: dict, contract_id: str, actor) -> None:
     st.rerun()
 
 
+def _save_edits(event: dict, contract_id: str, actor) -> None:
+    """Persist the editor buffer: direct save for document owners, otherwise a
+    tracked change per edited section."""
+    edits = event.get("edits") or []
+    saved = 0
+    tracked = 0
+    for item in edits:
+        section_id = item.get("section_id")
+        before = item.get("before", "")
+        after = item.get("after", "")
+        try:
+            if event.get("direct"):
+                editing_service.apply_edit(contract_id, section_id, before, after, actor, "rich editor")
+                saved += 1
+            else:
+                change_service.propose_change(
+                    contract_id, section_id, "UPDATE", before, after, actor
+                )
+                tracked += 1
+        except DomainError as exc:
+            st.error(f"{exc} (section {section_id})")
+    if saved:
+        st.session_state["review_flash"] = f"Saved {saved} section(s) directly — version bumped."
+    if tracked:
+        st.session_state["review_flash"] = (
+            f"{tracked} section(s) submitted as tracked changes for approval."
+        )
+    if not saved and not tracked:
+        st.session_state["review_flash"] = "No changes to save."
+
+
 def render() -> None:
     st.title("🖊️ Document Review")
     st.caption(
@@ -83,6 +136,10 @@ def render() -> None:
     contract_id, actor, contract, stakeholders = get_context()
     st.markdown(status_badge(contract["status"]), unsafe_allow_html=True)
     render_reviewer_manager(contract_id, actor, stakeholders, contract)
+
+    flash = st.session_state.pop("review_flash", None)
+    if flash:
+        st.success(flash)
 
     payload = build_payload(contract_id, actor)
     actor_color = payload["actor"]["color"]

@@ -1,8 +1,17 @@
-/* Document review component for the contract MVP.
+/* Document review + simple word processor for the contract MVP.
  *
- * Streamlit custom component (no build step): the iframe receives a JSON payload
- * with the document, inline annotations and tracked changes, and posts user
- * intents back through the component value.
+ * Streamlit custom component (no build step). Two modes share one paper:
+ *
+ *   Review — the document rendered from the block model; select words to
+ *            comment or suggest an edit; highlights keep the reviewer colour.
+ *   Edit   — the same blocks wrapped in a contenteditable surface so whole
+ *            paragraphs can be cut, pasted, reordered or deleted. A toolbar
+ *            covers headings, lists, tables and inline styling; every action
+ *            works with the browser's native selection and undo stack.
+ *
+ * On save the DOM is serialised back to the Markdown subset parsed by
+ * core/richtext.py, so the stored clause stays plain text and every downstream
+ * feature (diff, audit, anchors, PDF) keeps working.
  */
 (function () {
   "use strict";
@@ -10,11 +19,15 @@
   var app = document.getElementById("app");
   var state = {
     data: null,
+    mode: "view",
     activeColor: null,
     selection: null,
     selMode: "comment",
     openThreadId: null,
     showResolved: true,
+    lineNumbers: false,
+    dirty: false,
+    focusSection: null,
     scrollY: 0
   };
 
@@ -48,7 +61,15 @@
     if (!args.payload) return;
     var first = state.data === null;
     state.scrollY = first ? 0 : window.scrollY;
+    // Never wipe a dirty editor: Streamlit re-sends the payload whenever the
+    // frame is re-measured, which used to discard unsaved typing mid-keystroke.
+    if (state.mode === "edit" && state.dirty) {
+      state.pendingPayload = args.payload;
+      return;
+    }
     state.data = args.payload;
+    state.dirty = false;
+    if (state.mode === "edit" && !canEdit()) state.mode = "view";
     render();
     requestAnimationFrame(function () {
       resize();
@@ -62,6 +83,10 @@
     if (cls) node.className = cls;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  function canEdit() {
+    return !!(state.data && (state.data.can_edit || state.data.can_propose));
   }
 
   function initials(name) {
@@ -100,25 +125,23 @@
     });
 
     var revisions = ((state.data.revisions || {})[sectionId] || []).map(function (r) {
-      return { kind: "revision", start: r.start, end: r.end, color: r.color, label: r.label, author: r.author, when: r.when };
+      return { kind: "revision", start: r.start, end: r.end, color: r.color, label: r.label, author: r.author };
     }).sort(function (a, b) { return a.start - b.start; });
 
     var marks = [];
-    var pos = 0;
+    var position = 0;
     revisions.forEach(function (rev) {
       var start = rev.start, end = rev.end;
-      // carve out space already used by comment highlights
       clipped.forEach(function (c) {
         if (end <= c.start || start >= c.end) return;
         if (start < c.start) marks.push(Object.assign({}, rev, { start: start, end: c.start }));
         start = Math.max(start, c.end);
       });
-      if (start < end && end > pos) marks.push(Object.assign({}, rev, { start: start, end: end }));
-      pos = Math.max(pos, end);
+      if (start < end && end > position) marks.push(Object.assign({}, rev, { start: start, end: end }));
+      position = Math.max(position, end);
     });
 
     var all = clipped.concat(marks).sort(function (a, b) { return a.start - b.start; });
-    // final safety pass: never overlap
     var safe = [];
     var limit = 0;
     all.forEach(function (m) {
@@ -128,25 +151,125 @@
     return safe;
   }
 
-  function buildDecorated(container, text, decorations) {
-    var cursor = 0;
-    decorations.forEach(function (m) {
-      if (m.start > cursor) container.appendChild(document.createTextNode(text.slice(cursor, m.start)));
-      var span = document.createElement("span");
-      span.className = "ann" + (m.kind === "revision" ? " rev" : "") + (m.resolved ? " resolved" : "");
-      span.style.setProperty("--c", m.color);
-      span.textContent = text.slice(m.start, m.end);
-      if (m.kind === "comment") {
-        span.dataset.commentId = m.id;
-        span.title = "Annotation #" + numberFor(m.id) + " — click to open";
-      } else {
+  /* ---------------- inline rendering ---------------- */
+  function wrap(tag, child) {
+    var node = document.createElement(tag);
+    node.appendChild(child);
+    return node;
+  }
+
+  function buildPiece(text, run, dec) {
+    var node = document.createTextNode(text);
+    if (run.code) node = wrap("code", node);
+    if (run.bold) node = wrap("strong", node);
+    if (run.italic) node = wrap("em", node);
+    if (run.underline) node = wrap("u", node);
+    if (run.strike) node = wrap("del", node);
+    if (dec) {
+      var span = el(
+        "span",
+        "ann" + (dec.kind === "revision" ? " rev" : "") + (dec.resolved ? " resolved" : "")
+      );
+      span.style.setProperty("--c", dec.color);
+      if (dec.kind === "revision") {
         span.dataset.revision = "1";
-        span.title = m.label || ("Revised by " + m.author);
+        span.title = dec.label || "";
+      } else {
+        span.dataset.commentId = dec.id;
+        span.title = "Annotation #" + numberFor(dec.id) + " — click to open";
       }
-      container.appendChild(span);
-      cursor = m.end;
+      span.appendChild(node);
+      node = span;
+    }
+    return node;
+  }
+
+  function segments(text, abs, decs) {
+    if (!decs || !decs.length) return [{ text: text, dec: null }];
+    var cuts = [0, text.length];
+    decs.forEach(function (dec) {
+      var start = Math.max(dec.start, abs) - abs;
+      var end = Math.min(dec.end, abs + text.length) - abs;
+      if (start < end) cuts.push(start, end);
     });
-    if (cursor < text.length) container.appendChild(document.createTextNode(text.slice(cursor)));
+    cuts.sort(function (a, b) { return a - b; });
+    var out = [];
+    for (var i = 1; i < cuts.length; i++) {
+      if (cuts[i] <= cuts[i - 1]) continue;
+      var from = cuts[i - 1], to = cuts[i];
+      var middle = abs + from;
+      var hit = null;
+      decs.forEach(function (dec) {
+        if (!hit && dec.start <= middle && dec.end >= abs + to) hit = dec;
+      });
+      out.push({ text: text.slice(from, to), dec: hit });
+    }
+    return out.length ? out : [{ text: text, dec: null }];
+  }
+
+  function renderInline(target, runs, base, decs) {
+    var painted = false;
+    (runs || []).forEach(function (run) {
+      segments(run.text, base + run.p, decs).forEach(function (piece) {
+        if (!piece.text) return;
+        target.appendChild(buildPiece(piece.text, run, piece.dec));
+        painted = true;
+      });
+    });
+    if (!painted) target.appendChild(document.createTextNode(""));
+  }
+
+  /* ---------------- block rendering ---------------- */
+  function renderBlock(block, decs) {
+    var node;
+    if (block.type === "h1" || block.type === "h2" || block.type === "h3") {
+      node = el(block.type.toUpperCase(), "blk " + block.type);
+      node.dataset.start = block.start;
+      node.dataset.linehost = "1";
+      renderInline(node, block.runs, block.start, decs);
+      return node;
+    }
+    if (block.type === "ul" || block.type === "ol") {
+      node = el(block.type === "ol" ? "OL" : "UL", "blk list");
+      (block.items || []).forEach(function (item) {
+        var li = el("li");
+        li.dataset.start = block.start + item.start;
+        li.dataset.linehost = "1";
+        renderInline(li, item.runs, block.start + item.start, decs);
+        node.appendChild(li);
+      });
+      return node;
+    }
+    if (block.type === "table") {
+      node = el("table", "blk-table");
+      var body = el("tbody");
+      (block.rows || []).forEach(function (row) {
+        var tr = el("tr");
+        tr.dataset.linehost = "1";
+        (row.cells || []).forEach(function (cell) {
+          var td = el(row.header ? "th" : "td");
+          td.dataset.start = block.start + cell.start;
+          renderInline(td, cell.runs, block.start + cell.start, decs);
+          tr.appendChild(td);
+        });
+        body.appendChild(tr);
+      });
+      node.appendChild(body);
+      return node;
+    }
+    if (block.type === "quote") {
+      node = el("blockquote", "blk");
+      node.dataset.start = block.start;
+      node.dataset.linehost = "1";
+      renderInline(node, block.runs, block.start, decs);
+      return node;
+    }
+    if (block.type === "hr") return el("hr");
+    node = el("p", "blk");
+    node.dataset.start = block.start;
+    node.dataset.linehost = "1";
+    renderInline(node, block.runs, block.start, decs);
+    return node;
   }
 
   /* ---------------- render ---------------- */
@@ -154,66 +277,36 @@
     var p = state.data;
     app.innerHTML = "";
 
-    var topbar = el("div", "topbar");
-    topbar.appendChild(el("div", "doctitle", p.contract.title));
-    var meta = el("div", "meta");
-    meta.appendChild(el("span", "pill status", p.contract.status_label));
-    var version = el("span", "pill", "v" + p.contract.version);
-    meta.appendChild(version);
-    var mine = el("span", "pill");
-    var dot = el("span", "dot");
-    dot.style.background = p.actor.color;
-    dot.style.width = "10px"; dot.style.height = "10px";
-    mine.appendChild(dot);
-    mine.appendChild(document.createTextNode(p.actor.name + " · " + p.actor.role));
-    meta.appendChild(mine);
-    topbar.appendChild(meta);
-    topbar.appendChild(el("div", "spacer"));
-    if (!p.can_annotate) {
-      var closed = el("span", "pill", "Review closed");
-      topbar.appendChild(closed);
-    }
-    var printBtn = el("button", "btn", "Print / PDF");
-    printBtn.addEventListener("click", function () { window.print(); });
-    topbar.appendChild(printBtn);
-    app.appendChild(topbar);
-
-    var legend = el("div", "legend");
-    (p.people || []).forEach(function (person) {
-      var chip = el("span", "who");
-      var swatch = el("span", "dot", initials(person.name));
-      swatch.style.background = person.color;
-      chip.appendChild(swatch);
-      chip.appendChild(el("span", "nm", person.name));
-      chip.appendChild(el("span", "role", "· " + person.role));
-      legend.appendChild(chip);
-    });
-    app.appendChild(legend);
+    app.appendChild(renderTopbar());
+    if (state.mode === "edit") app.appendChild(renderToolbar());
+    app.appendChild(renderLegend());
 
     var layout = el("div", "layout");
-    var paper = el("main", "paper");
-    paper.appendChild(el("h1", "", p.contract.title));
+    var paper = el("main", "paper" + (state.lineNumbers ? " with-lines" : ""));
+    paper.appendChild(el("h1", "doc-title", p.contract.title));
     var docmeta = el("div", "docmeta");
     docmeta.appendChild(el("span", "", "Status: " + p.contract.status_label));
     docmeta.appendChild(el("span", "", "Version v" + p.contract.version));
     docmeta.appendChild(el("span", "", "Reviewers: " + (p.people || []).length));
-    docmeta.appendChild(el("span", "", p.can_annotate ? "Select any text to comment" : "Read-only"));
+    docmeta.appendChild(
+      el("span", "", state.mode === "edit" ? "Editing — save to apply" : (p.can_annotate ? "Select any text to comment" : "Read-only"))
+    );
     paper.appendChild(docmeta);
 
     (p.sections || []).forEach(function (section, index) {
       paper.appendChild(renderSection(section, index));
     });
+    paper.appendChild(el("div", "gutter"));
 
-    var rail = renderRail();
     layout.appendChild(paper);
-    layout.appendChild(rail);
+    layout.appendChild(renderRail());
     app.appendChild(layout);
     app.appendChild(renderPrintNotes());
 
-    bindSelection();
+    if (state.mode === "view") bindSelection();
+    paintLineNumbers();
     resize();
 
-    // keep the open thread visible across Streamlit reruns
     if (state.openThreadId) {
       var stillThere = (p.annotations || []).filter(function (a) { return a.id === state.openThreadId; })[0];
       if (!stillThere) {
@@ -226,21 +319,149 @@
     }
   }
 
+  function renderTopbar() {
+    var p = state.data;
+    var bar = el("div", "topbar");
+    bar.appendChild(el("div", "doctitle", p.contract.title));
+    var meta = el("div", "meta");
+    meta.appendChild(el("span", "pill status", p.contract.status_label));
+    meta.appendChild(el("span", "pill", "v" + p.contract.version));
+    var mine = el("span", "pill");
+    var dot = el("span", "dot");
+    dot.style.cssText = "width:10px;height:10px;border-radius:50%;display:inline-block;background:" + p.actor.color;
+    mine.appendChild(dot);
+    mine.appendChild(document.createTextNode(p.actor.name + " · " + p.actor.role));
+    meta.appendChild(mine);
+    bar.appendChild(meta);
+    bar.appendChild(el("div", "spacer"));
+
+    if (canEdit()) {
+      var modes = el("div", "modes");
+      modes.appendChild(
+        modeButton("Review", "view", "Read, comment and track changes")
+      );
+      modes.appendChild(
+        modeButton(p.can_edit ? "Edit" : "Suggest edits", "edit", "Edit the document with the toolbar")
+      );
+      bar.appendChild(modes);
+    }
+    if (!p.can_annotate) bar.appendChild(el("span", "pill", "Review closed"));
+
+    var lines = el("button", "btn" + (state.lineNumbers ? " active" : ""), "123");
+    lines.title = "Show line numbers";
+    lines.addEventListener("click", function () {
+      state.lineNumbers = !state.lineNumbers;
+      var paper = document.querySelector(".paper");
+      if (paper) paper.classList.toggle("with-lines", state.lineNumbers);
+      this.classList.toggle("active", state.lineNumbers);
+      paintLineNumbers();
+      resize();
+    });
+    bar.appendChild(lines);
+
+    var printBtn = el("button", "btn", "Print / PDF");
+    printBtn.addEventListener("click", function () { window.print(); });
+    bar.appendChild(printBtn);
+    return bar;
+  }
+
+  function modeButton(label, mode, hint) {
+    var btn = el("button", "mode-btn" + (state.mode === mode ? " active" : ""), label);
+    btn.title = hint;
+    btn.addEventListener("click", function () { setMode(mode); });
+    return btn;
+  }
+
+  function setMode(mode) {
+    if (mode === state.mode) return;
+    if (mode === "view" && state.dirty && !window.confirm("Discard the unsaved edits?")) return;
+    state.mode = mode;
+    state.dirty = false;
+    if (state.pendingPayload) {
+      state.data = state.pendingPayload;
+      state.pendingPayload = null;
+    }
+    render();
+    requestAnimationFrame(resize);
+  }
+
+  function renderLegend() {
+    var legend = el("div", "legend");
+    (state.data.people || []).forEach(function (person) {
+      var chip = el("span", "who");
+      var swatch = el("span", "dot", initials(person.name));
+      swatch.style.background = person.color;
+      chip.appendChild(swatch);
+      chip.appendChild(el("span", "nm", person.name));
+      chip.appendChild(el("span", "role", "· " + person.role));
+      legend.appendChild(chip);
+    });
+    return legend;
+  }
+
   function renderSection(section, index) {
     var wrap = el("section", "sec");
     wrap.dataset.sectionId = section.id;
-    wrap.appendChild(el("h2", "", (index + 1) + ". " + section.title));
-    var textEl = el("div", "text");
-    textEl.dataset.sectionId = section.id;
-    buildDecorated(textEl, section.content || "", decorationsFor(section.id));
-    textEl.addEventListener("click", function (event) {
-      var span = event.target.closest(".ann");
-      if (span && span.dataset.commentId) {
-        event.stopPropagation();
-        openThread(span.dataset.commentId, span);
-      }
+
+    var head = el("div", "sec-head");
+    head.appendChild(el("span", "sec-no", String(index + 1) + "."));
+    if (state.mode === "edit" && state.data.can_edit) {
+      var input = document.createElement("input");
+      input.className = "sec-title-input";
+      input.value = section.title;
+      input.setAttribute("aria-label", "Section title");
+      input.addEventListener("change", function () {
+        if (input.value.trim() && input.value.trim() !== section.title) {
+          structural({ action: "rename_section", section_id: section.id, title: input.value.trim() });
+        }
+      });
+      head.appendChild(input);
+      var tools = el("div", "sec-tools");
+      tools.appendChild(toolBtn("↑", "Move section up", function () {
+        structural({ action: "move_section", section_id: section.id, direction: -1 });
+      }));
+      tools.appendChild(toolBtn("↓", "Move section down", function () {
+        structural({ action: "move_section", section_id: section.id, direction: 1 });
+      }));
+      tools.appendChild(toolBtn("＋", "Add a section below", function () {
+        structural({ action: "add_section", after_section_id: section.id });
+      }));
+      tools.appendChild(toolBtn("🗑", "Delete this section", function () {
+        if (window.confirm("Delete section “" + section.title + "”?")) {
+          structural({ action: "delete_section", section_id: section.id });
+        }
+      }));
+      head.appendChild(tools);
+    } else {
+      head.appendChild(el("h2", "sec-title", section.title));
+    }
+    wrap.appendChild(head);
+
+    var body = el("div", state.mode === "edit" ? "body editable" : "body");
+    body.dataset.sectionId = section.id;
+    var decs = state.mode === "edit" ? [] : decorationsFor(section.id);
+
+    if (!(section.blocks || []).length) {
+      var empty = el("p", "blk");
+      empty.dataset.start = 0;
+      empty.dataset.linehost = "1";
+      empty.appendChild(document.createElement("br"));
+      body.appendChild(empty);
+    }
+    (section.blocks || []).forEach(function (block) {
+      body.appendChild(renderBlock(block, decs));
     });
-    wrap.appendChild(textEl);
+
+    if (state.mode === "edit") {
+      body.contentEditable = "true";
+      body.spellcheck = false;
+      body.addEventListener("focusin", function () { state.focusSection = section.id; });
+      body.addEventListener("input", afterEdit);
+      body.addEventListener("paste", onPaste);
+      body.addEventListener("keyup", scheduleLines);
+      body.addEventListener("mouseup", scheduleLines);
+    }
+    wrap.appendChild(body);
 
     var changes = (state.data.changes || []).filter(function (c) {
       return c.section_id === section.id && c.status !== "MERGED";
@@ -256,8 +477,7 @@
   function renderChange(change) {
     var box = el("div", "change");
     var head = el("div", "chg-head");
-    var badge = el("strong", "", "Tracked change · " + change.operation + " · " + change.status);
-    head.appendChild(badge);
+    head.appendChild(el("strong", "", "Tracked change · " + change.operation + " · " + change.status));
     var who = el("span", "", change.author + " · " + change.when);
     if (change.reviewed_by) who.textContent += " · reviewed by " + change.reviewed_by;
     head.appendChild(who);
@@ -266,10 +486,7 @@
     var body = el("div", "chg-body");
     (change.diff || []).forEach(function (op) {
       if (op.op === "eq") body.appendChild(document.createTextNode(op.text));
-      else {
-        var span = el("span", op.op === "del" ? "del" : "ins", op.text);
-        body.appendChild(span);
-      }
+      else body.appendChild(el("span", op.op === "del" ? "del" : "ins", op.text));
     });
     box.appendChild(body);
 
@@ -301,26 +518,400 @@
     return box;
   }
 
+  /* ---------------- toolbar (edit mode) ---------------- */
+  function toolBtn(label, hint, handler, cls) {
+    var btn = el("button", "tb-btn" + (cls ? " " + cls : ""), label);
+    btn.type = "button";
+    btn.title = hint;
+    // keep the caret where it is: never let the button take focus
+    btn.addEventListener("mousedown", function (event) { event.preventDefault(); });
+    btn.addEventListener("click", function (event) {
+      event.preventDefault();
+      handler();
+    });
+    return btn;
+  }
+
+  function renderToolbar() {
+    var bar = el("div", "toolbar");
+
+    var select = document.createElement("select");
+    select.className = "tb-select";
+    select.title = "Paragraph style";
+    [["p", "Body text"], ["h1", "Title"], ["h2", "Heading 1"], ["h3", "Heading 2"], ["blockquote", "Quote"]].forEach(
+      function (option) {
+        var node = document.createElement("option");
+        node.value = option[0];
+        node.textContent = option[1];
+        select.appendChild(node);
+      }
+    );
+    select.addEventListener("mousedown", function () { state.focusSection && focusEditable(); });
+    select.addEventListener("change", function () {
+      applyBlock(select.value);
+      select.selectedIndex = 0;
+    });
+    bar.appendChild(select);
+
+    bar.appendChild(toolBtn("B", "Bold (Ctrl+B)", function () { exec("bold"); }, "b"));
+    bar.appendChild(toolBtn("I", "Italic (Ctrl+I)", function () { exec("italic"); }, "i"));
+    bar.appendChild(toolBtn("U", "Underline (Ctrl+U)", function () { exec("underline"); }, "u"));
+    bar.appendChild(toolBtn("S", "Strikethrough", function () { exec("strikeThrough"); }, "s"));
+    bar.appendChild(el("span", "tb-sep"));
+    bar.appendChild(toolBtn("• List", "Bulleted list", function () { exec("insertUnorderedList"); }));
+    bar.appendChild(toolBtn("1. List", "Numbered list", function () { exec("insertOrderedList"); }));
+    bar.appendChild(toolBtn("▦ Table", "Insert a table", function (event) { openTablePicker(event); }));
+    bar.appendChild(toolBtn("— Line", "Horizontal rule", function () { exec("insertHorizontalRule"); }));
+    bar.appendChild(el("span", "tb-sep"));
+    bar.appendChild(toolBtn("⇤", "Clear formatting", function () { exec("removeFormat"); }));
+    bar.appendChild(toolBtn("↶", "Undo (Ctrl+Z)", function () { exec("undo"); }));
+    bar.appendChild(toolBtn("↷", "Redo (Ctrl+Shift+Z)", function () { exec("redo"); }));
+
+    bar.appendChild(el("span", "spacer"));
+
+    var discard = el("button", "btn", "Discard");
+    discard.addEventListener("click", function () {
+      if (!state.dirty || window.confirm("Discard the unsaved edits?")) {
+        state.dirty = false;
+        render();
+        requestAnimationFrame(resize);
+      }
+    });
+    bar.appendChild(discard);
+
+    var save = el("button", "btn primary", "Save changes");
+    save.id = "save-btn";
+    save.title = state.data.can_edit
+      ? "Save directly: version +1 and the edit is marked as yours"
+      : "Submit your edits as tracked changes for approval";
+    save.disabled = !state.dirty;
+    save.addEventListener("click", saveEdits);
+    bar.appendChild(save);
+    return bar;
+  }
+
+  function refreshSaveBtn() {
+    var btn = document.getElementById("save-btn");
+    if (btn) btn.disabled = !state.dirty;
+  }
+
+  function exec(command, value) {
+    if (!focusEditable()) return;
+    document.execCommand(command, false, value === undefined ? null : value);
+    afterEdit();
+  }
+
+  function applyBlock(tag) {
+    if (!focusEditable()) return;
+    document.execCommand("formatBlock", false, tag === "p" ? "p" : tag);
+    afterEdit();
+  }
+
+  function focusEditable() {
+    var sel = window.getSelection();
+    var node = sel && sel.rangeCount ? sel.getRangeAt(0).commonAncestorContainer : null;
+    var host = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+    var editable = host ? host.closest(".editable") : null;
+    if (!editable && state.focusSection) {
+      editable = document.querySelector('.editable[data-section-id="' + state.focusSection + '"]');
+    }
+    if (!editable) return null;
+    if (sel && sel.rangeCount && editable.contains(sel.getRangeAt(0).commonAncestorContainer)) return editable;
+    editable.focus();
+    var range = document.createRange();
+    range.selectNodeContents(editable);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return editable;
+  }
+
+  function onPaste(event) {
+    event.preventDefault();
+    var text = "";
+    try {
+      text = (event.clipboardData || window.clipboardData).getData("text/plain") || "";
+    } catch (err) {
+      text = "";
+    }
+    if (!text) return;
+    var html = text.split(/\r?\n/).map(function (line) {
+      return line.replace(/[&<>]/g, function (ch) {
+        return ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : "&gt;";
+      });
+    }).join("<br>");
+    document.execCommand("insertHTML", false, html);
+    afterEdit();
+  }
+
+  function openTablePicker() {
+    var existing = document.querySelector(".tbl-picker");
+    if (existing) { existing.remove(); return; }
+    var host = focusEditable();
+    if (!host) return;
+    var picker = el("div", "tbl-picker");
+    var label = el("div", "tp-label", "Insert table");
+    picker.appendChild(label);
+    var grid = el("div", "tp-grid");
+    for (var r = 1; r <= 6; r++) {
+      for (var c = 1; c <= 6; c++) {
+        (function (rows, cols) {
+          var cell = el("div", "tp-cell");
+          cell.dataset.rows = String(rows);
+          cell.dataset.cols = String(cols);
+          cell.addEventListener("mouseenter", function () {
+            label.textContent = rows + " × " + cols;
+            Array.prototype.forEach.call(grid.children, function (node) {
+              var on = Number(node.dataset.rows) <= rows && Number(node.dataset.cols) <= cols;
+              node.classList.toggle("on", on);
+            });
+          });
+          cell.addEventListener("mousedown", function (event) { event.preventDefault(); });
+          cell.addEventListener("click", function (event) {
+            event.preventDefault();
+            insertTable(rows, cols);
+            picker.remove();
+          });
+          grid.appendChild(cell);
+        })(r, c);
+      }
+    }
+    picker.appendChild(grid);
+    var rect = host.getBoundingClientRect();
+    picker.style.left = Math.min(rect.left + 40, window.innerWidth - 220) + "px";
+    picker.style.top = window.scrollY + 96 + "px";
+    document.body.appendChild(picker);
+    setTimeout(function () {
+      document.addEventListener("mousedown", closePicker, { once: true });
+    }, 0);
+    function closePicker(event) {
+      if (!event.target.closest(".tbl-picker")) picker.remove();
+    }
+  }
+
+  function insertTable(rows, cols) {
+    if (!focusEditable()) return;
+    var html = '<table class="blk-table"><tbody>';
+    for (var r = 0; r < rows; r++) {
+      html += "<tr>";
+      for (var c = 0; c < cols; c++) {
+        html += r === 0 ? "<th>Column " + (c + 1) + "</th>" : "<td><br></td>";
+      }
+      html += "</tr>";
+    }
+    html += '</tbody></table><p><br></p>';
+    document.execCommand("insertHTML", false, html);
+    afterEdit();
+  }
+
+  function afterEdit() {
+    state.dirty = true;
+    refreshSaveBtn();
+    refreshLineHosts();
+    scheduleLines();
+    scheduleResize();
+  }
+
+  /* execCommand turns a paragraph into <h2>, wraps lines in <div> and inserts
+   * tables without our data attributes; line numbering needs them back. */
+  function refreshLineHosts() {
+    Array.prototype.forEach.call(document.querySelectorAll(".editable"), function (host) {
+      Array.prototype.forEach.call(host.children, function (child) {
+        if (child.tagName === "TABLE") {
+          Array.prototype.forEach.call(child.querySelectorAll("tr"), function (row) {
+            row.dataset.linehost = "1";
+          });
+        } else if (child.tagName !== "HR") {
+          child.dataset.linehost = "1";
+        }
+      });
+    });
+  }
+
+  var lineTimer = null;
+  function scheduleLines() {
+    if (lineTimer) clearTimeout(lineTimer);
+    lineTimer = setTimeout(function () { paintLineNumbers(); }, 160);
+  }
+
+  var resizeTimer = null;
+  function scheduleResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resize, 200);
+  }
+
+  /* ---------------- DOM → Markdown ---------------- */
+  function escMd(text) {
+    return String(text).replace(/([\\`*_+~|])/g, "\\$1");
+  }
+
+  function inlineMd(node) {
+    var out = "";
+    Array.prototype.forEach.call(node.childNodes, function (child) {
+      if (child.nodeType === 3) { out += escMd(child.nodeValue); return; }
+      if (child.nodeType !== 1) return;
+      var tag = child.tagName;
+      if (tag === "BR") { out += "\n"; return; }
+      var inner = inlineMd(child);
+      if (!inner) return;
+      if (tag === "B" || tag === "STRONG") out += "**" + inner + "**";
+      else if (tag === "I" || tag === "EM") out += "*" + inner + "*";
+      else if (tag === "U") out += "++" + inner + "++";
+      else if (tag === "S" || tag === "STRIKE" || tag === "DEL") out += "~~" + inner + "~~";
+      else if (tag === "CODE") out += "`" + inner + "`";
+      else if (tag === "SPAN") {
+        var computed = window.getComputedStyle(child);
+        var weight = parseInt(computed.fontWeight, 10) || 400;
+        var deco = computed.textDecorationLine || computed.textDecoration || "";
+        if (weight >= 600) inner = "**" + inner + "**";
+        if (/underline/.test(deco)) inner = "++" + inner + "++";
+        if (/line-through/.test(deco)) inner = "~~" + inner + "~~";
+        out += inner;
+      } else if (tag === "DIV" || tag === "P") {
+        out += (/[\n]$/.test(out) || !out ? "" : "\n") + inner;
+      } else {
+        out += inner;
+      }
+    });
+    return out;
+  }
+
+  function serializeSection(host) {
+    var parts = [];
+    var buffer = "";
+    function flush() {
+      var text = buffer.trim();
+      if (text) parts.push(text);
+      buffer = "";
+    }
+    Array.prototype.forEach.call(host.childNodes, function (node) {
+      if (node.nodeType === 3) { buffer += escMd(node.nodeValue); return; }
+      if (node.nodeType !== 1) return;
+      var tag = node.tagName;
+      if (tag === "BR") { buffer += "\n"; return; }
+      flush();
+      if (tag === "H1" || tag === "H2" || tag === "H3") {
+        var heading = inlineMd(node).trim();
+        if (heading) parts.push("###".slice(0, Number(tag[1])) + " " + heading);
+      } else if (tag === "UL" || tag === "OL") {
+        var ordered = tag === "OL";
+        var counter = 1;
+        var items = [];
+        Array.prototype.forEach.call(node.children, function (li) {
+          if (li.tagName !== "LI") return;
+          var text = inlineMd(li).replace(/\s*\n\s*/g, " ").trim();
+          if (!text) return;
+          items.push((ordered ? counter++ + ". " : "- ") + text);
+        });
+        if (items.length) parts.push(items.join("\n"));
+      } else if (tag === "BLOCKQUOTE") {
+        var quote = inlineMd(node).trim();
+        if (quote) parts.push(quote.split("\n").map(function (line) { return "> " + line; }).join("\n"));
+      } else if (tag === "TABLE") {
+        var rows = [];
+        Array.prototype.forEach.call(node.querySelectorAll("tr"), function (tr) {
+          var cells = [];
+          Array.prototype.forEach.call(tr.children, function (cell) {
+            cells.push(inlineMd(cell).replace(/\s*\n\s*/g, " ").trim());
+          });
+          if (!cells.length) return;
+          if (!rows.length) {
+            rows.push("| " + cells.join(" | ") + " |");
+            rows.push("| " + cells.map(function () { return "---"; }).join(" | ") + " |");
+          } else {
+            rows.push("| " + cells.join(" | ") + " |");
+          }
+        });
+        if (rows.length) parts.push(rows.join("\n"));
+      } else if (tag === "HR") {
+        parts.push("---");
+      } else {
+        var text = inlineMd(node);
+        if (text.trim()) parts.push(text);
+      }
+    });
+    flush();
+    return parts.join("\n\n");
+  }
+
+  function structural(action) {
+    // structural changes rerun Streamlit, which would throw away an unsaved buffer
+    if (state.dirty && !window.confirm("You have unsaved edits. Discard them and continue?")) return;
+    state.dirty = false;
+    state.pendingPayload = null;
+    emit(action);
+  }
+
+  function saveEdits() {
+    var edits = [];
+    (state.data.sections || []).forEach(function (section) {
+      var host = document.querySelector('.editable[data-section-id="' + section.id + '"]');
+      if (!host) return;
+      var after = serializeSection(host);
+      if (after.replace(/\s+$/, "") !== (section.markdown || "").replace(/\s+$/, "")) {
+        edits.push({ section_id: section.id, before: section.markdown, after: after });
+      }
+    });
+    if (!edits.length) {
+      state.dirty = false;
+      refreshSaveBtn();
+      return;
+    }
+    state.dirty = false;
+    state.pendingPayload = null;
+    refreshSaveBtn();
+    emit({ action: "save_edits", edits: edits, direct: !!state.data.can_edit });
+  }
+
+  /* ---------------- line numbers ---------------- */
+  function paintLineNumbers() {
+    var paper = document.querySelector(".paper");
+    var gutter = document.querySelector(".gutter");
+    if (!paper || !gutter) return;
+    gutter.innerHTML = "";
+    if (!state.lineNumbers) return;
+    var baseTop = paper.getBoundingClientRect().top;
+    var count = 0;
+    Array.prototype.forEach.call(paper.querySelectorAll("[data-linehost]"), function (host) {
+      var rects = [];
+      if (host.tagName === "TR") {
+        rects = [host.getBoundingClientRect()];
+      } else {
+        var range = document.createRange();
+        range.selectNodeContents(host);
+        rects = Array.prototype.slice.call(range.getClientRects());
+      }
+      var seen = {};
+      rects.forEach(function (rect) {
+        if (rect.height < 4 || rect.width < 1) return;
+        var top = Math.round(rect.top - baseTop);
+        if (seen[top]) return;
+        seen[top] = true;
+        count += 1;
+        var label = el("span", "ln", String(count));
+        label.style.top = top + "px";
+        gutter.appendChild(label);
+      });
+    });
+  }
+
+  /* ---------------- rail ---------------- */
   function renderRail() {
     var rail = el("aside", "rail");
     var head = el("div", "rail-head");
     head.appendChild(document.createTextNode("Comments"));
     var open = (state.data.annotations || []).filter(function (a) { return !a.resolved; }).length;
     head.appendChild(el("span", "count", String(open)));
-    var spacer = el("span", "");
-    spacer.style.flex = "1";
-    head.appendChild(spacer);
-    var toggle = el("label", "who");
-    toggle.style.fontSize = "11px";
-    toggle.style.color = "#4b5563";
+    head.appendChild(el("span", "spacer-flex"));
+    var toggle = el("label", "who small");
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = state.showResolved;
     cb.style.marginRight = "4px";
     cb.addEventListener("change", function () {
       state.showResolved = cb.checked;
-      render();
-      requestAnimationFrame(resize);
+      var old = document.querySelector(".rail");
+      if (old) old.replaceWith(renderRail());
     });
     toggle.appendChild(cb);
     toggle.appendChild(document.createTextNode("resolved"));
@@ -348,11 +939,12 @@
     var card = el("div", "card" + (a.resolved ? " resolved" : ""));
     card.style.setProperty("--c", a.color);
     card.dataset.commentId = a.id;
-    var quote = el("div", "quote", "“" + (a.quote || "section note") + "”");
-    card.appendChild(quote);
+    card.appendChild(el("div", "quote", "“" + (a.quote || "section note") + "”"));
     var who = el("div", "who");
     var dot = el("span", "dot");
-    dot.style.cssText = "width:14px;height:14px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#fff;background:" + a.color;
+    dot.style.cssText =
+      "width:14px;height:14px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;" +
+      "font-size:8px;color:#fff;background:" + a.color;
     dot.textContent = initials(a.author);
     who.appendChild(dot);
     who.appendChild(el("span", "nm", a.author));
@@ -363,8 +955,7 @@
       var replies = el("div", "replies");
       a.replies.forEach(function (r) {
         var row = el("div", "r");
-        var b = el("b", "", r.author + ": ");
-        row.appendChild(b);
+        row.appendChild(el("b", "", r.author + ": "));
         row.appendChild(document.createTextNode(r.text));
         replies.appendChild(row);
       });
@@ -388,8 +979,7 @@
     box.appendChild(el("h3", "", "Comments"));
     (state.data.annotations || []).forEach(function (a) {
       var note = el("div", "pn");
-      var b = el("b", "", numberFor(a.id) + ". " + a.author);
-      note.appendChild(b);
+      note.appendChild(el("b", "", numberFor(a.id) + ". " + a.author));
       note.appendChild(document.createTextNode(
         " · " + a.when + (a.resolved ? " · resolved" : "") + " — “" + (a.quote || "") + "” — " + a.text
       ));
@@ -416,17 +1006,36 @@
     return total;
   }
 
+  function leafOf(node) {
+    var element = node && node.nodeType === 1 ? node : node && node.parentElement;
+    return element ? element.closest("[data-start]") : null;
+  }
+
   function bindSelection() {
     var paper = document.querySelector(".paper");
     if (!paper) return;
     paper.addEventListener("mouseup", function () {
-      if (!state.data.can_annotate) return;
+      if (!state.data.can_annotate || state.mode !== "view") return;
       setTimeout(captureSelection, 0);
+    });
+    // highlights and revision marks are clickable (blocks are re-created on every
+    // render, so the handler lives on the paper instead of each span)
+    paper.addEventListener("click", function (event) {
+      if (state.mode !== "view") return;
+      var span = event.target.closest(".ann");
+      if (span && span.dataset.commentId) {
+        event.stopPropagation();
+        openThread(span.dataset.commentId, span);
+      }
     });
     document.addEventListener("mousedown", function (event) {
       if (!event.target.closest(".selbar") && !event.target.closest(".ann")) hideSelbar();
       if (!event.target.closest(".popover") && !event.target.closest(".ann") && !event.target.closest(".card")) {
         hidePopover();
+      }
+      if (!event.target.closest(".tbl-picker")) {
+        var picker = document.querySelector(".tbl-picker");
+        if (picker) picker.remove();
       }
     });
   }
@@ -435,25 +1044,22 @@
     var sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) { hideSelbar(); return; }
     var range = sel.getRangeAt(0);
-    var node = range.commonAncestorContainer;
-    var host = node.nodeType === 1 ? node : node.parentElement;
-    var textEl = host ? host.closest(".text") : null;
-    if (!textEl) { hideSelbar(); return; }
-    if (!textEl.contains(range.startContainer) || !textEl.contains(range.endContainer)) { hideSelbar(); return; }
-    var start = offsetIn(textEl, range.startContainer, range.startOffset);
-    var end = offsetIn(textEl, range.endContainer, range.endOffset);
+    var startLeaf = leafOf(range.startContainer);
+    var endLeaf = leafOf(range.endContainer);
+    if (!startLeaf || !endLeaf) { hideSelbar(); return; }
+    var startSection = startLeaf.closest(".sec");
+    var endSection = endLeaf.closest(".sec");
+    if (!startSection || startSection !== endSection) { hideSelbar(); return; }
+    var section = sectionById(startSection.dataset.sectionId);
+    if (!section) { hideSelbar(); return; }
+    var start = Number(startLeaf.dataset.start) + offsetIn(startLeaf, range.startContainer, range.startOffset);
+    var end = Number(endLeaf.dataset.start) + offsetIn(endLeaf, range.endContainer, range.endOffset);
     if (end < start) { var swap = start; start = end; end = swap; }
     if (end - start < 1) { hideSelbar(); return; }
-    var section = sectionById(textEl.dataset.sectionId);
-    if (!section) { hideSelbar(); return; }
+    var quote = (section.plain || "").slice(start, end);
+    if (!quote.trim()) { hideSelbar(); return; }
     var rect = range.getBoundingClientRect();
-    state.selection = {
-      sectionId: section.id,
-      start: start,
-      end: end,
-      quote: (section.content || "").slice(start, end),
-      rect: rect
-    };
+    state.selection = { sectionId: section.id, start: start, end: end, quote: quote, rect: rect };
     state.selMode = "comment";
     showSelbar();
   }
@@ -471,25 +1077,25 @@
 
     var row = el("div", "row");
     colors.forEach(function (color) {
-      var sw = document.createElement("button");
-      sw.className = "sw" + (color === state.activeColor ? " active" : "");
-      sw.style.background = color;
-      sw.title = "Annotate in this colour";
-      sw.addEventListener("click", function (event) {
+      var swatch = document.createElement("button");
+      swatch.className = "sw" + (color === state.activeColor ? " active" : "");
+      swatch.style.background = color;
+      swatch.title = "Annotate in this colour";
+      swatch.addEventListener("click", function (event) {
         event.stopPropagation();
         state.activeColor = color;
         showSelbar();
       });
-      row.appendChild(sw);
+      row.appendChild(swatch);
     });
     bar.appendChild(row);
 
-    var quote = el("div", "quote", "“" + state.selection.quote.slice(0, 160) + (state.selection.quote.length > 160 ? "…" : "") + "”");
-    bar.appendChild(quote);
+    var quoteText = state.selection.quote;
+    bar.appendChild(el("div", "quote", "“" + quoteText.slice(0, 160) + (quoteText.length > 160 ? "…" : "") + "”"));
 
     var ta = document.createElement("textarea");
     ta.placeholder = mode === "comment" ? "Write your comment…" : "Replace the selected text (leave empty to delete it)";
-    if (mode === "change") ta.value = state.selection.quote;
+    if (mode === "change") ta.value = quoteText;
     bar.appendChild(ta);
 
     var actions = el("div", "actions");
@@ -511,7 +1117,7 @@
       });
       actions.appendChild(suggest);
     }
-    if (mode === "change" && state.data.can_propose) {
+    if (mode === "change") {
       var back = el("button", "btn", "Back");
       back.addEventListener("click", function (event) {
         event.stopPropagation();
@@ -524,30 +1130,27 @@
     var submit = el("button", "btn primary", mode === "comment" ? "Add comment" : "Submit change");
     submit.addEventListener("click", function (event) {
       event.stopPropagation();
-      var value = ta.value.trim();
+      var value = ta.value;
       var sel = state.selection;
       if (mode === "comment") {
-        if (!value) { ta.focus(); return; }
+        if (!value.trim()) { ta.focus(); return; }
         emit({
           action: "comment",
           section_id: sel.sectionId,
           start: sel.start,
           end: sel.end,
           quote: sel.quote,
-          message: value,
+          message: value.trim(),
           color: state.activeColor
         });
       } else {
-        var section = sectionById(sel.sectionId);
-        if (!section) return;
-        var after = section.content.slice(0, sel.start) + ta.value + section.content.slice(sel.end);
-        if (after === section.content) { ta.focus(); return; }
+        if (!value.trim() && !window.confirm("Delete the selected text?")) return;
         emit({
-          action: "propose_change",
+          action: "apply_range",
           section_id: sel.sectionId,
-          operation: ta.value.trim() ? "UPDATE" : "DELETE",
-          before_content: section.content,
-          after_content: after
+          start: sel.start,
+          end: sel.end,
+          replacement: value
         });
       }
       hideSelbar();
@@ -557,12 +1160,11 @@
     actions.appendChild(submit);
     bar.appendChild(actions);
 
-    var hint = el("div", "hint", mode === "comment"
+    bar.appendChild(el("div", "hint", mode === "comment"
       ? "Your comment is anchored to the selected words"
-      : "Reviewers will see this as a tracked change");
-    bar.appendChild(hint);
-
+      : "Reviewers will see this as a tracked change"));
     bar.classList.add("open");
+
     var rect = state.selection.rect;
     var left = Math.min(Math.max(rect.left + rect.width / 2, 150), window.innerWidth - 150);
     bar.style.left = left + "px";
@@ -580,8 +1182,7 @@
 
   /* ---------------- thread popover ---------------- */
   function openThread(id, anchorEl) {
-    var rect = anchorEl.getBoundingClientRect();
-    openPopover(id, rect);
+    openPopover(id, anchorEl.getBoundingClientRect());
     markActiveCard(id);
   }
 
@@ -600,7 +1201,9 @@
 
     var head = el("div", "p-head");
     var dot = el("span", "dot");
-    dot.style.cssText = "width:16px;height:16px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#fff;background:" + annotation.color;
+    dot.style.cssText =
+      "width:16px;height:16px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;" +
+      "font-size:8px;color:#fff;background:" + annotation.color;
     dot.textContent = initials(annotation.author);
     head.appendChild(dot);
     head.appendChild(el("span", "nm", annotation.author));
@@ -618,8 +1221,7 @@
 
     (annotation.replies || []).forEach(function (reply) {
       var row = el("div", "p-reply");
-      var b = el("b", "", reply.author);
-      row.appendChild(b);
+      row.appendChild(el("b", "", reply.author));
       row.appendChild(document.createTextNode(" · " + reply.when));
       row.appendChild(el("div", "", reply.text));
       pop.appendChild(row);
@@ -663,7 +1265,7 @@
 
     pop.classList.add("open");
     var width = 320;
-    var left = rect.right + 12;
+    var left = rect.right ? rect.right + 12 : rect.left;
     if (left + width > window.innerWidth - 8) left = Math.max(8, rect.left - width - 12);
     var top = Math.min(Math.max(rect.top - 6, 60), window.innerHeight - 320);
     pop.style.left = left + "px";
@@ -686,10 +1288,16 @@
   }
 
   /* ---------------- boot ---------------- */
+  window.__reviewState = state; // exposed for the Playwright smoke test
   send("streamlit:componentReady", { apiVersion: 1 });
   resize();
-  if (window.ResizeObserver) {
-    new ResizeObserver(function () { resize(); }).observe(app);
-  }
-  window.addEventListener("resize", function () { resize(); });
+  if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(app);
+  window.addEventListener("resize", function () { resize(); scheduleLines(); });
+  document.addEventListener("keydown", function (event) {
+    if (state.mode !== "edit") return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      if (state.dirty) saveEdits();
+    }
+  });
 })();

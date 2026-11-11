@@ -8,10 +8,12 @@ Markdown / printable export.
 from __future__ import annotations
 
 import difflib
+import re
 
 import config
 from core import contracts as contract_service
 from core import discussions as discussion_service
+from core import richtext
 from core import changes as change_service
 from core.constants import (
     CHANGE_APPROVED,
@@ -27,6 +29,8 @@ from core.constants import (
     Actor,
 )
 from db.database import fetch_all, fetch_one
+
+_MARKUP = re.compile(r"(\*\*|__|~~|\+\+|`|\|)")
 
 
 def _fmt(value) -> str:
@@ -76,7 +80,7 @@ def _revision_marks(sections: list[dict], merged: list[dict], people: dict[str, 
     """Locate the text each merged change introduced, so the document can mark it
     "changed by X on date" like Word's track-changes margin."""
     marks: dict[str, list[dict]] = {}
-    content_by_section = {section["section_id"]: section["content"] or "" for section in sections}
+    content_by_section = {section["section_id"]: richtext.plain(section["content"] or "") for section in sections}
     for change in merged:
         content = content_by_section.get(change["section_id"])
         if content is None:
@@ -86,6 +90,8 @@ def _revision_marks(sections: list[dict], merged: list[dict], people: dict[str, 
         cursor = 0
         for fragment in inserted:
             probe = fragment.strip()
+            if _MARKUP.search(probe):
+                probe = richtext.plain(probe).strip()
             if len(probe) < 3:
                 cursor += len(fragment)
                 continue
@@ -104,7 +110,90 @@ def _revision_marks(sections: list[dict], merged: list[dict], people: dict[str, 
                 }
             )
             cursor = found + len(probe)
-    return marks
+    return {section_id: _merge_marks(items) for section_id, items in marks.items()}
+
+
+def _merge_marks(marks: list[dict], gap: int = 2, limit: int = 6) -> list[dict]:
+    """Coalesce revision marks so a rewritten clause does not litter the page.
+
+    Character-level fragments are stitched together while they are close, and a
+    heavily rewritten section collapses to one range instead of dozens.
+    """
+    if not marks:
+        return []
+    ordered = sorted(marks, key=lambda item: (item["start"], item["end"]))
+    merged: list[dict] = []
+    for mark in ordered:
+        if merged and mark["start"] - merged[-1]["end"] <= gap:
+            merged[-1]["end"] = max(merged[-1]["end"], mark["end"])
+            continue
+        merged.append(dict(mark))
+    if len(merged) > limit:
+        first, last = merged[0], merged[-1]
+        return [{**first, "end": last["end"], "label": first["label"], "kind": "REWRITE"}]
+    return merged
+
+
+def _runs_payload(runs: list[dict]) -> list[dict]:
+    out = []
+    for run in runs:
+        item = {"text": run["text"], "p": run["p"]}
+        for key in ("bold", "italic", "underline", "strike", "code"):
+            if run.get(key):
+                item[key] = True
+        out.append(item)
+    return out
+
+
+def _blocks_payload(blocks: list[dict]) -> list[dict]:
+    """JSON view of the parsed document: enough to render, no HTML."""
+    payload = []
+    for block in blocks:
+        item = {
+            "type": block["type"],
+            "start": block["start"],
+            "end": block["end"],
+            "text": block["text"],
+            "runs": _runs_payload(block["runs"]),
+        }
+        if block["items"]:
+            item["items"] = [
+                {"text": entry["text"], "start": entry["start"], "runs": _runs_payload(entry["runs"])}
+                for entry in block["items"]
+            ]
+        if block["rows"]:
+            item["rows"] = [
+                {
+                    "header": bool(row.get("header")),
+                    "cells": [
+                        {"text": cell["text"], "start": cell["start"], "runs": _runs_payload(cell["runs"])}
+                        for cell in row["cells"]
+                    ],
+                }
+                for row in block["rows"]
+            ]
+        payload.append(item)
+    return payload
+
+
+def _relocate(start, end, quoted: str, body: str) -> tuple[int | None, int | None]:
+    """Keep an annotation usable when the clause was edited around it.
+
+    Offsets are authoritative while the quoted text still sits at the stored
+    position (the common case). After an edit moved things we look the quote up;
+    if it is gone the thread degrades to a section note instead of pointing at
+    the wrong words.
+    """
+    if start is None or end is None:
+        return None, None
+    start, end = int(start), int(end)
+    if 0 <= start < end <= len(body) and (not quoted or body[start:end] == quoted):
+        return start, end
+    if quoted:
+        found = body.find(quoted)
+        if found >= 0:
+            return found, found + len(quoted)
+    return None, None
 
 
 def build_payload(contract_id: str, actor: Actor) -> dict:
@@ -115,9 +204,26 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
     threads = discussion_service.list_threads(contract_id)
     change_rows = change_service.list_changes(contract_id)
 
+    section_payload = []
+    for section in sections:
+        content = section["content"] or ""
+        blocks = richtext.parse(content)
+        section_payload.append(
+            {
+                "id": section["section_id"],
+                "title": section["title"],
+                "markdown": content,
+                "plain": "\n".join(block["text"] for block in blocks),
+                "blocks": _blocks_payload(blocks),
+            }
+        )
+    plain_by_section = {item["id"]: item["plain"] for item in section_payload}
+
     annotations = []
     for thread in threads:
         author = people.get(thread["author_id"], {"name": thread["author_id"], "color": config.ADMIN_COLOR})
+        body = plain_by_section.get(thread["section_id"], "")
+        start, end = _relocate(thread["anchor_start"], thread["anchor_end"], thread["quoted_text"] or "", body)
         threads_payload = []
         for reply in thread["replies"]:
             reply_author = people.get(reply["author_id"], {"name": reply["author_id"], "color": config.ADMIN_COLOR})
@@ -135,8 +241,8 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
             {
                 "id": thread["comment_id"],
                 "section_id": thread["section_id"],
-                "start": thread["anchor_start"],
-                "end": thread["anchor_end"],
+                "start": start,
+                "end": end,
                 "quote": thread["quoted_text"] or "",
                 "author": author["name"],
                 "author_role": ROLE_LABELS.get(author.get("role"), author.get("role", "")),
@@ -176,6 +282,9 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
     can_annotate = contract["status"] in DISCUSSION_STATUSES
     can_propose = contract["status"] in EDITABLE_STATUSES
     can_review_changes = contract["status"] not in FROZEN_STATUSES and actor.role in (ROLE_APPROVER, ROLE_ADMIN)
+    # Direct edits (no approval round-trip) are limited to people who own the
+    # document; everyone else keeps the tracked-change path.
+    can_edit = contract["status"] in EDITABLE_STATUSES and actor.role in (ROLE_ADMIN, ROLE_APPROVER)
     return {
         "contract": {
             "id": contract_id,
@@ -184,10 +293,7 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
             "status_label": STATUS_LABELS.get(contract["status"], contract["status"]),
             "version": contract["version"],
         },
-        "sections": [
-            {"id": section["section_id"], "title": section["title"], "content": section["content"] or ""}
-            for section in sections
-        ],
+        "sections": section_payload,
         "annotations": annotations,
         "changes": change_payload,
         "revisions": revision_marks,
@@ -209,6 +315,7 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
         "palette": [{"color": color, "label": config.PALETTE_LABELS.get(color, color)} for color in config.REVIEW_PALETTE],
         "can_annotate": can_annotate,
         "can_propose": can_propose,
+        "can_edit": can_edit,
         "can_review_changes": can_review_changes,
         "stakeholders": len(stakeholders),
     }

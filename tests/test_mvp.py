@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -25,7 +26,7 @@ os.environ["MVP_PDF_ENGINE"] = "auto"
 
 import pytest  # noqa: E402
 
-from core import approvals, changes, contracts, discussions, export, pdf, review, signing  # noqa: E402
+from core import approvals, changes, contracts, discussions, editing, export, pdf, review, richtext, signing  # noqa: E402
 from core.audit import list_events  # noqa: E402
 from core.constants import (  # noqa: E402
     APPROVED,
@@ -432,4 +433,110 @@ def test_tracked_change_marks_author_and_time_and_appears_in_exports():
     assert "45 days of invoice" in markdown  # the body carries the merged text
     assert "| Payment Terms | UPDATE | Admin |" in markdown
     printable = export.build_print_html(contract_id, ADMIN)
-    assert "45 days of invoice" in printable
+    # the merged text is now wrapped in a revision mark, so compare the text only
+    assert "45 days of invoice" in re.sub(r"<[^>]+>", "", printable)
+    assert "Revised by Admin" in printable
+
+
+RICH_BODY = """### Payment schedule
+
+Payment within **45 days** of invoice, per the table below.
+
+| Milestone | Share |
+| --- | --- |
+| Kickoff | 30% |
+| Go-live | 70% |
+
+- every invoice must reference the PO
+- late payment accrues 2% monthly
+"""
+
+
+def test_richtext_keeps_plain_projection_stable():
+    """Markup must never leak into the text that anchors are measured against."""
+    assert richtext.plain("Payment within 30 days.") == "Payment within 30 days."
+    plain = richtext.plain(RICH_BODY)
+    assert "**" not in plain and "|" not in plain
+    assert plain.splitlines()[0] == "Payment schedule"
+    assert [block["type"] for block in richtext.parse(RICH_BODY)] == ["h3", "p", "table", "ul"]
+
+    # a range inside bold text edits the words, not the markers
+    index = plain.find("45 days")
+    replaced = richtext.replace_plain_range(RICH_BODY, index, index + len("45 days"), "60 days")
+    assert "**60 days**" in replaced
+    assert replaced.count("**") == 2
+
+    # escaping lets a clause talk about * or | literally
+    assert richtext.plain(r"Cost \*5\* and \| pipe") == "Cost *5* and | pipe"
+
+
+def test_editor_saves_rich_section_and_marks_who_changed_it():
+    contract_id = contracts.create_contract("Rich Editor", SECTIONS, STAKEHOLDERS, ADMIN)
+    section = contracts.list_sections(contract_id)[1]
+    before = section["content"]
+
+    result = editing.apply_edit(contract_id, section["section_id"], before, RICH_BODY, ADMIN, "editor")
+    assert result["version"] == 2
+    assert contracts.get_contract(contract_id)["version"] == 2
+
+    payload = review.build_payload(contract_id, ADMIN)
+    saved = next(item for item in payload["sections"] if item["id"] == section["section_id"])
+    assert saved["markdown"] == RICH_BODY
+    assert [block["type"] for block in saved["blocks"]] == ["h3", "p", "table", "ul"]
+    assert saved["blocks"][0]["runs"][0]["text"] == "Payment schedule"
+
+    marks = payload["revisions"][section["section_id"]]
+    assert marks and marks[0]["author"] == ADMIN.name
+
+    # the printable copy renders the structure, not raw markup
+    printable = export.build_print_html(contract_id, ADMIN)
+    assert "<table class=\"doc-table\">" in printable and "<li>" in printable
+    assert "**" not in printable
+    assert "| Kickoff |" in export.build_markdown(contract_id, ADMIN)
+
+    # an editor holding a stale copy cannot overwrite someone else's save
+    with pytest.raises(DomainError):
+        editing.apply_edit(contract_id, section["section_id"], before, "clobbered", ADMIN)
+
+    # reviewers keep the tracked-change path instead of writing directly
+    bob = _actor_by_role(contract_id, ROLE_STAKEHOLDER)
+    with pytest.raises(DomainError):
+        editing.apply_edit(contract_id, section["section_id"], RICH_BODY, "bob was here", bob)
+    tracked = editing.apply_range(
+        contract_id, section["section_id"], 0, len("Payment schedule"), "Payment timetable", bob
+    )
+    assert tracked["mode"] == "tracked"
+    pending = changes.list_changes(contract_id)[0]
+    assert pending["status"] == "PENDING"
+    # the clause is untouched until an approver merges the tracked change
+    assert "### Payment timetable" in pending["after_content"]
+    assert "### Payment schedule" in contracts.get_section(section["section_id"])["content"]
+
+
+def test_section_structure_operations_are_audited_and_guarded():
+    contract_id = contracts.create_contract("Structure", SECTIONS, STAKEHOLDERS, ADMIN)
+    original = contracts.list_sections(contract_id)
+    added = editing.add_section(contract_id, original[0]["section_id"], "Audit Rights", "Records for 3 years.", ADMIN)
+    order = [row["section_id"] for row in contracts.list_sections(contract_id)]
+    assert order.index(added) == order.index(original[0]["section_id"]) + 1
+
+    editing.rename_section(added, "Audit", ADMIN)
+    assert contracts.get_section(added)["title"] == "Audit"
+    editing.move_section(added, -1, ADMIN)
+    assert [row["section_id"] for row in contracts.list_sections(contract_id)].index(added) == 0
+
+    # a section carrying conversation cannot vanish
+    discussions.add_comment(
+        contract_id, added, "who audits?", _actors(contract_id)[0]
+    )
+    with pytest.raises(DomainError):
+        editing.delete_section(added, ADMIN)
+
+    empty_section = original[2]["section_id"]
+    editing.delete_section(empty_section, ADMIN)
+    assert empty_section not in [row["section_id"] for row in contracts.list_sections(contract_id)]
+
+    events = [event["event_type"] for event in list_events(contract_id)]
+    assert "SECTION_ADDED" in events and "SECTION_RENAMED" in events
+    assert "SECTION_MOVED" in events and "SECTION_REMOVED" in events
+    assert "SECTION_EDITED" not in events, "structure changes are not text edits"

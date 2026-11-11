@@ -10,37 +10,13 @@ import html as html_lib
 from pathlib import Path
 
 import config
+from core import richtext
 from core.constants import Actor
 from core.review import build_payload
 
 
 def _safe(text: str) -> str:
     return html_lib.escape(text or "")
-
-
-def _decorate(text: str, marks: list[dict], number_of: dict[str, int]) -> str:
-    """Wrap annotated ranges in coloured spans and append reference numbers."""
-    if not marks:
-        return _safe(text).replace("\n", "<br>")
-    clipped: list[dict] = []
-    cursor = 0
-    for mark in sorted(marks, key=lambda item: (item["start"], item["end"])):
-        start = max(mark["start"], cursor)
-        if start >= mark["end"]:
-            continue
-        clipped.append({**mark, "start": start})
-        cursor = mark["end"]
-    parts: list[str] = []
-    position = 0
-    for mark in clipped:
-        parts.append(_safe(text[position : mark["start"]]))
-        fragment = _safe(text[mark["start"] : mark["end"]])
-        number = number_of.get(mark["id"], "")
-        ref = f"<sup class=\"ref\">{number}</sup>" if number else ""
-        parts.append(f'<span class="ann" style="--c:{mark["color"]}">{fragment}{ref}</span>')
-        position = mark["end"]
-    parts.append(_safe(text[position:]))
-    return "".join(parts).replace("\n", "<br>")
 
 
 def _number_annotations(annotations: list[dict]) -> dict[str, int]:
@@ -71,19 +47,11 @@ def build_markdown(contract_id: str, actor: Actor) -> str:
     for index, section in enumerate(payload["sections"], start=1):
         lines.append(f"## {index}. {section['title']}")
         lines.append("")
-        text = section["content"]
         section_annotations = [
             item for item in annotations if item["section_id"] == section["id"] and item["start"] is not None
         ]
-        if section_annotations:
-            marked = text
-            # insert references from the end so offsets stay valid
-            for item in sorted(section_annotations, key=lambda row: row["end"], reverse=True):
-                if 0 <= item["end"] <= len(marked):
-                    marked = f"{marked[:item['end']]}[^{numbers[item['id']]}]{marked[item['end']:]}"
-            lines.append(marked)
-        else:
-            lines.append(text)
+        refs = [(item["end"], str(numbers[item["id"]])) for item in section_annotations]
+        lines.append(richtext.insert_references(section["markdown"], refs))
         lines.append("")
 
         section_changes = [
@@ -137,6 +105,16 @@ h1 { font-size: 26px; margin: 0 0 6px; }
 .meta span { display:inline-block; margin-right:14px; }
 h2 { font-size: 16px; margin: 26px 0 8px; }
 p.body { font-size: 14px; line-height: 1.9; margin: 0 0 10px; white-space: pre-wrap; }
+h3 { font-size: 14px; margin: 18px 0 6px; }
+blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid #d1d5db; color:#374151; font-style: italic; }
+ul, ol { margin: 6px 0 10px; padding-left: 26px; font-size: 14px; line-height: 1.8; }
+table.doc-table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 13px; }
+table.doc-table th, table.doc-table td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; }
+table.doc-table th { background: #f3f4f6; }
+hr { border: 0; border-top: 1px solid #e5e7eb; margin: 16px 0; }
+code { background: #f3f4f6; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+del { color: #6b7280; }
+.ann.rev { background: #fef3c7; }
 .ann { background: color-mix(in srgb, var(--c) 12%, transparent); border-bottom: 2px solid var(--c);
        padding: 0 1px; border-radius: 2px; }
 .ref { color: var(--c); font-family: Arial, Helvetica, sans-serif; font-size: 10px; font-weight: 700; }
@@ -181,12 +159,24 @@ def build_print_html(contract_id: str, actor: Actor) -> str:
                 "start": item["start"],
                 "end": item["end"],
                 "color": item["color"],
+                "ref": numbers[item["id"]],
+                "kind": "comment",
             }
             for item in annotations
             if item["section_id"] == section["id"] and item["start"] is not None and not item["resolved"]
         ]
+        marks.extend(
+            {
+                "start": mark["start"],
+                "end": mark["end"],
+                "color": mark.get("color", "#d97706"),
+                "label": mark.get("label", ""),
+                "kind": "revision",
+            }
+            for mark in payload["revisions"].get(section["id"], [])
+        )
         body.append(f"<h2>{index}. {_safe(section['title'])}</h2>")
-        body.append(f"<p class=\"body\">{_decorate(section['content'], marks, numbers)}</p>")
+        body.append(richtext.render_html(richtext.parse(section["markdown"]), marks))
 
         for change in payload["changes"]:
             if change["section_id"] != section["id"] or change["status"] == "MERGED":
