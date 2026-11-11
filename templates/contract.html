@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ contract.title }}</title>
+<style>
+  @page { size: A4; margin: 18mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+    color: #1f2937; font-size: 11pt; line-height: 1.65; margin: 0;
+  }
+  .brand { font-size: 8pt; letter-spacing: .18em; color: #6b7280; text-transform: uppercase; }
+  .doc-header { border-bottom: 2px solid #1e3a8a; padding-bottom: 14px; margin-bottom: 22px; }
+  h1 { font-size: 21pt; margin: 10px 0 12px; color: #111827; }
+  .meta { font-size: 9pt; color: #4b5563; }
+  .meta span { display: inline-block; margin-right: 18px; }
+  h2 {
+    font-size: 12pt; color: #1e3a8a; margin: 24px 0 10px;
+    border-left: 3px solid #1e3a8a; padding-left: 8px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  th, td { border: 1px solid #d1d5db; padding: 7px 9px; text-align: left; }
+  th { background: #f3f4f6; color: #374151; font-weight: 600; }
+  .clause { page-break-inside: avoid; margin-bottom: 14px; }
+  .clause h3 { font-size: 11pt; margin: 0 0 6px; color: #111827; }
+  .clause p { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .sign td { height: 46px; vertical-align: bottom; }
+  .sign .label { color: #6b7280; font-size: 8pt; }
+  .footer {
+    margin-top: 28px; padding-top: 10px; border-top: 1px solid #e5e7eb;
+    font-size: 8pt; color: #9ca3af; display: flex; justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+  <div class="doc-header">
+    <div class="brand">Contract Negotiation &amp; Approval Platform</div>
+    <h1>{{ contract.title }}</h1>
+    <div class="meta">
+      <span>Contract ID: {{ contract.contract_id }}</span>
+      <span>Version: v{{ contract.version }}</span>
+      <span>Status: {{ contract.status }}</span>
+      <span>Generated: {{ generated_at }}</span>
+    </div>
+  </div>
+
+  <h2>Parties</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Email</th><th>Role</th></tr></thead>
+    <tbody>
+    {% for party in stakeholders %}
+      <tr><td>{{ party.name }}</td><td>{{ party.email }}</td><td>{{ party.role }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Terms</h2>
+  {% for section in sections %}
+  <section class="clause">
+    <h3>{{ loop.index }}. {{ section.title }}</h3>
+    <p>{{ section.content if section.content else "(deleted)" }}</p>
+  </section>
+  {% endfor %}
+
+  <h2>Signatures</h2>
+  <table class="sign">
+    <tbody>
+    {% for party in stakeholders %}
+      <tr>
+        <td>{{ party.name }}<br><span class="label">{{ party.email }}</span></td>
+        <td>Signature: ______________________<br><span class="label">Date: __________________</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    <span>Final execution copy · generated from locked contract v{{ contract.version }}</span>
+    <span>{{ contract.contract_id }}</span>
+  </div>
+</body>
+</html>

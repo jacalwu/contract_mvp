@@ -1,0 +1,140 @@
+"""Domain constants shared by services and UI."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from uuid import uuid4
+
+
+class DomainError(Exception):
+    """Business rule violation. Never a raw database error leaking to the UI."""
+
+
+@dataclass(frozen=True)
+class Actor:
+    id: str
+    name: str
+    role: str  # ADMIN | APPROVER | STAKEHOLDER
+
+
+ROLE_ADMIN = "ADMIN"
+ROLE_APPROVER = "APPROVER"
+ROLE_STAKEHOLDER = "STAKEHOLDER"
+ROLES = (ROLE_ADMIN, ROLE_APPROVER, ROLE_STAKEHOLDER)
+
+DRAFT = "DRAFT"
+IN_REVIEW = "IN_REVIEW"
+PENDING_APPROVAL = "PENDING_APPROVAL"
+APPROVED = "APPROVED"
+LOCKED = "LOCKED"
+SIGNING = "SIGNING"
+EXECUTED = "EXECUTED"
+CONTRACT_STATUSES = (DRAFT, IN_REVIEW, PENDING_APPROVAL, APPROVED, LOCKED, SIGNING, EXECUTED)
+EDITABLE_STATUSES = (DRAFT, IN_REVIEW)
+# Discussion stays open through approval so reviewers added mid-flight can still comment.
+# Content edits and new change requests remain limited to EDITABLE_STATUSES.
+DISCUSSION_STATUSES = (DRAFT, IN_REVIEW, PENDING_APPROVAL)
+FROZEN_STATUSES = (APPROVED, LOCKED, SIGNING, EXECUTED)
+
+OP_INSERT = "INSERT"
+OP_UPDATE = "UPDATE"
+OP_DELETE = "DELETE"
+OPERATIONS = (OP_INSERT, OP_UPDATE, OP_DELETE)
+
+CHANGE_PENDING = "PENDING"
+CHANGE_APPROVED = "APPROVED"
+CHANGE_REJECTED = "REJECTED"
+CHANGE_MERGED = "MERGED"
+UNMERGED_CHANGE_STATUSES = (CHANGE_PENDING, CHANGE_APPROVED)
+
+CLARIFICATION_OPEN = "OPEN"
+CLARIFICATION_ANSWERED = "ANSWERED"
+CLARIFICATION_CLOSED = "CLOSED"
+
+APPROVAL_PENDING = "PENDING"
+APPROVAL_APPROVED = "APPROVED"
+APPROVAL_REJECTED = "REJECTED"
+
+SIGNATURE_PENDING = "PENDING"
+SIGNATURE_SIGNED = "SIGNED"
+
+PROVIDER_MOCK = "MOCK"
+PROVIDER_DROPBOX_SIGN = "DROPBOX_SIGN"
+
+# design.md audit event types
+E_CONTRACT_CREATED = "CONTRACT_CREATED"
+E_COMMENT_CREATED = "COMMENT_CREATED"
+E_COMMENT_UPDATED = "COMMENT_UPDATED"
+E_COMMENT_DELETED = "COMMENT_DELETED"
+E_CLARIFICATION_CREATED = "CLARIFICATION_CREATED"
+E_CLARIFICATION_ANSWERED = "CLARIFICATION_ANSWERED"
+E_CLARIFICATION_CLOSED = "CLARIFICATION_CLOSED"
+E_CHANGE_CREATED = "CHANGE_REQUEST_CREATED"
+E_CHANGE_APPROVED = "CHANGE_REQUEST_APPROVED"
+E_CHANGE_REJECTED = "CHANGE_REQUEST_REJECTED"
+E_CHANGE_MERGED = "CHANGE_REQUEST_MERGED"
+E_APPROVAL_GRANTED = "APPROVAL_GRANTED"
+E_APPROVAL_REVOKED = "APPROVAL_REVOKED"
+E_CONTRACT_APPROVED = "CONTRACT_APPROVED"
+E_CONTRACT_LOCKED = "CONTRACT_LOCKED"
+E_PDF_GENERATED = "PDF_GENERATED"
+E_SIGNATURE_REQUESTED = "SIGNATURE_REQUESTED"
+E_SIGNATURE_COMPLETED = "SIGNATURE_COMPLETED"
+E_CONTRACT_EXECUTED = "CONTRACT_EXECUTED"
+# extensions: every state transition and admin action still needs an audit record
+E_STAKEHOLDER_ADDED = "STAKEHOLDER_ADDED"
+E_STAKEHOLDER_REMOVED = "STAKEHOLDER_REMOVED"
+E_REVIEW_STARTED = "CONTRACT_SUBMITTED_FOR_REVIEW"
+E_APPROVAL_STARTED = "CONTRACT_SUBMITTED_FOR_APPROVAL"
+
+EVENT_LABELS = {
+    E_CONTRACT_CREATED: "Contract created",
+    E_COMMENT_CREATED: "Comment posted",
+    E_COMMENT_UPDATED: "Comment edited",
+    E_COMMENT_DELETED: "Comment deleted",
+    E_CLARIFICATION_CREATED: "Clarification raised",
+    E_CLARIFICATION_ANSWERED: "Clarification answered",
+    E_CLARIFICATION_CLOSED: "Clarification closed",
+    E_CHANGE_CREATED: "Change request submitted",
+    E_CHANGE_APPROVED: "Change accepted",
+    E_CHANGE_REJECTED: "Change rejected",
+    E_CHANGE_MERGED: "Change merged",
+    E_APPROVAL_GRANTED: "Approval granted",
+    E_APPROVAL_REVOKED: "Approval revoked / rejected",
+    E_CONTRACT_APPROVED: "Contract approved",
+    E_CONTRACT_LOCKED: "Contract locked",
+    E_PDF_GENERATED: "PDF generated",
+    E_SIGNATURE_REQUESTED: "Signature requested",
+    E_SIGNATURE_COMPLETED: "Signature completed",
+    E_CONTRACT_EXECUTED: "Contract executed",
+    E_STAKEHOLDER_ADDED: "Stakeholder added",
+    E_STAKEHOLDER_REMOVED: "Stakeholder removed",
+    E_REVIEW_STARTED: "Submitted for review",
+    E_APPROVAL_STARTED: "Submitted for approval",
+}
+
+STATUS_LABELS = {
+    DRAFT: "Draft",
+    IN_REVIEW: "In review",
+    PENDING_APPROVAL: "Pending approval",
+    APPROVED: "Approved",
+    LOCKED: "Locked",
+    SIGNING: "Signing",
+    EXECUTED: "Executed",
+}
+
+ROLE_LABELS = {
+    ROLE_ADMIN: "Admin",
+    ROLE_APPROVER: "Approver",
+    ROLE_STAKEHOLDER: "Stakeholder",
+}
+
+OPERATION_LABELS = {OP_INSERT: "Insert", OP_UPDATE: "Update", OP_DELETE: "Delete"}
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex[:10].upper()}"
+
+
+def now() -> datetime:
+    return datetime.now()

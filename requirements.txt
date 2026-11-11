@@ -1,0 +1,9 @@
+streamlit>=1.40,<2
+duckdb>=1.1,<2
+Jinja2>=3.1,<4
+python-dotenv>=1.0,<2
+requests>=2.31,<3
+playwright>=1.47,<2
+pytest>=8,<9
+# Optional HTML->PDF engine. On Windows WeasyPrint additionally needs GTK3 runtime.
+# weasyprint>=62,<66
