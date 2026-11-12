@@ -22,11 +22,16 @@ BASE_URL = os.getenv("MVP_SMOKE_URL", "http://127.0.0.1:8501").rstrip("/")
 PAGES = [
     ("Dashboard", "dashboard"),
     ("Document Review", "document-review"),
-    ("Contract Viewer", "viewer"),
-    ("Change Requests", "changes"),
-    ("Approvals", "approvals"),
+    ("Contract Audit History", "audit-history"),
     ("Timeline", "timeline"),
     ("PDF & Signature", "pdf-signature"),
+]
+# Contract Viewer / Change Requests / Approvals live as tabs inside the
+# "Contract Audit History" page; verify each tab renders.
+AUDIT_TABS = [
+    ("📄 Contract Viewer", "viewer"),
+    ("✏️ Change Requests", "changes"),
+    ("✅ Approvals", "approvals"),
 ]
 SHOT_DIR = BASE_DIR / "data" / "smoke"
 ERROR_MARKERS = ("Traceback (most recent call last)", "Something went wrong", "ModuleNotFoundError")
@@ -77,9 +82,11 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"demo creation: {str(exc)[:160]}")
 
-        # add an extra reviewer from the Contract Viewer (Admin is the default identity)
+        # add an extra reviewer from the Contract Viewer tab (Admin is the default identity)
         try:
-            _navigate(page, "Contract Viewer")
+            _navigate(page, "Contract Audit History")
+            page.get_by_role("tab", name="📄 Contract Viewer").click(timeout=10_000)
+            _wait(page, 1.5)
             page.get_by_text("Reviewers & stakeholders", exact=False).first.click(timeout=10_000)
             _wait(page, 1)
             page.get_by_placeholder("Dana Reviewer").first.fill("Dana Reviewer")
@@ -100,11 +107,22 @@ def main() -> int:
             except Exception as exc:
                 failures.append(f"{shot_name} navigation: {str(exc)[:160]}")
                 continue
-            _check(page, shot_name, failures)
+            if shot_name == "audit-history":
+                for tab_name, tab_shot in AUDIT_TABS:
+                    try:
+                        page.get_by_role("tab", name=tab_name).click(timeout=10_000)
+                        _wait(page, 1.5)
+                        _check(page, tab_shot, failures)
+                    except Exception as exc:
+                        failures.append(f"{tab_shot} tab: {str(exc)[:160]}")
+            else:
+                _check(page, shot_name, failures)
 
         # one real interaction: post a comment on the first section
         try:
-            _navigate(page, "Contract Viewer")
+            _navigate(page, "Contract Audit History")
+            page.get_by_role("tab", name="📄 Contract Viewer").click(timeout=10_000)
+            _wait(page, 1.5)
             page.get_by_text("Section 1 discussion", exact=False).first.click(timeout=10_000)
             _wait(page, 1)
             page.get_by_placeholder("Write a comment...").first.fill("Smoke test comment")

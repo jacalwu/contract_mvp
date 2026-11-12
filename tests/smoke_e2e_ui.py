@@ -38,6 +38,11 @@ def main() -> int:
         page.get_by_role("link", name=name).click(timeout=15_000)
         wait(page)
 
+    def open_audit_tab(page, tab_name: str) -> None:
+        nav(page, "Contract Audit History")
+        page.get_by_role("tab", name=tab_name).click(timeout=15_000)
+        wait(page)
+
     def click(page, name: str, exact: bool = False) -> bool:
         for _attempt in range(2):
             for locator in page.get_by_role("button", name=name, exact=exact).all():
@@ -76,7 +81,9 @@ def main() -> int:
         if "IN_REVIEW" not in body(page):
             failures.append("status did not become IN_REVIEW")
 
-        nav(page, "Change Requests")
+        # Contract Viewer / Change Requests / Approvals are now tabs under
+        # "Contract Audit History" rather than top-level sidebar links.
+        open_audit_tab(page, "✏️ Change Requests")
         # default operation is INSERT: append a new sentence to the current clause.
         # Streamlit text_area defers input until Ctrl+Enter / blur.
         textarea = page.locator("textarea").first
@@ -99,7 +106,7 @@ def main() -> int:
         if "PENDING_APPROVAL" not in body(page):
             failures.append("status did not become PENDING_APPROVAL")
 
-        nav(page, "Approvals")
+        open_audit_tab(page, "✅ Approvals")
         for index in range(3):
             if not click(page, "Approve", exact=True):
                 failures.append(f"approval #{index + 1} button not available")
