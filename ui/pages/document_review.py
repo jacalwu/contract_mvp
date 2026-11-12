@@ -97,33 +97,25 @@ def _handle_event(event: dict, contract_id: str, actor) -> None:
 
 
 def _save_edits(event: dict, contract_id: str, actor) -> None:
-    """Persist the editor buffer: direct save for document owners, otherwise a
-    tracked change per edited section."""
+    """Persist the editor buffer as tracked changes — one change request per
+    edited section. Nothing is written directly; the opposite party must accept
+    and merge each change."""
     edits = event.get("edits") or []
-    saved = 0
     tracked = 0
     for item in edits:
         section_id = item.get("section_id")
         before = item.get("before", "")
         after = item.get("after", "")
         try:
-            if event.get("direct"):
-                editing_service.apply_edit(contract_id, section_id, before, after, actor, "rich editor")
-                saved += 1
-            else:
-                change_service.propose_change(
-                    contract_id, section_id, "UPDATE", before, after, actor
-                )
-                tracked += 1
+            change_service.propose_change(contract_id, section_id, "UPDATE", before, after, actor)
+            tracked += 1
         except DomainError as exc:
             st.error(f"{exc} (section {section_id})")
-    if saved:
-        st.session_state["review_flash"] = f"Saved {saved} section(s) directly — version bumped."
     if tracked:
         st.session_state["review_flash"] = (
-            f"{tracked} section(s) submitted as tracked changes for approval."
+            f"{tracked} section(s) submitted as tracked changes — the opposite party must accept and merge them."
         )
-    if not saved and not tracked:
+    else:
         st.session_state["review_flash"] = "No changes to save."
 
 
@@ -135,7 +127,7 @@ def render() -> None:
     )
     contract_id, actor, contract, stakeholders = get_context()
     st.markdown(status_badge(contract["status"]), unsafe_allow_html=True)
-    render_reviewer_manager(contract_id, actor, stakeholders, contract)
+    render_reviewer_manager(contract_id, actor, stakeholders, contract, key_prefix="review")
 
     flash = st.session_state.pop("review_flash", None)
     if flash:

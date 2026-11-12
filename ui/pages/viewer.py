@@ -186,7 +186,7 @@ def render() -> None:
     st.caption("Current version by section · Comments / Replies / Clarifications")
     contract_id, actor, contract, stakeholders = get_context()
     st.markdown(status_badge(contract["status"]), unsafe_allow_html=True)
-    render_reviewer_manager(contract_id, actor, stakeholders, contract)
+    render_reviewer_manager(contract_id, actor, stakeholders, contract, key_prefix="viewer")
     can_add = can_discuss(contract)
     can_resolve = contract["status"] not in FROZEN_STATUSES
     if not can_add:

@@ -19,8 +19,10 @@ from core.constants import (
     E_STAKEHOLDER_REMOVED,
     IN_REVIEW,
     ROLE_ADMIN,
-    ROLE_APPROVER,
-    ROLES,
+    ROLE_STAKEHOLDER,
+    SIDE_BUYER,
+    SIDE_VENDOR,
+    SIDES,
     Actor,
     new_id,
     now,
@@ -64,23 +66,25 @@ def create_contract(
             (_clean_text(item.get("title"), f"Section {index} title"), _clean_text(item.get("content"), f"Section {index} content"))
         )
 
-    clean_stakeholders: list[tuple[str, str, str]] = []
+    clean_stakeholders: list[tuple[str, str, str, str]] = []
     seen_emails: set[str] = set()
     for item in stakeholders:
         name = _clean_text(item.get("name"), "Stakeholder name")
         email = _clean_text(item.get("email"), "Stakeholder email").lower()
-        role = str(item.get("role") or ROLE_APPROVER).strip().upper()
+        side = str(item.get("side") or SIDE_BUYER).strip().upper()
+        if side not in SIDES:
+            raise DomainError(f"Unknown side: {side}. Use {SIDE_BUYER} or {SIDE_VENDOR}.")
         if not _EMAIL_RE.match(email):
             raise DomainError(f"Invalid stakeholder email: {email}")
-        if role not in ROLES:
-            raise DomainError(f"Unknown role: {role}")
         if email in seen_emails:
             raise DomainError(f"Duplicate stakeholder email: {email}")
         seen_emails.add(email)
-        clean_stakeholders.append((name, email, role))
+        clean_stakeholders.append((name, email, side, ROLE_STAKEHOLDER))
 
-    if not any(role == ROLE_APPROVER for _, _, role in clean_stakeholders):
-        raise DomainError("At least one APPROVER is required to complete approval.")
+    buyer_count = sum(1 for _, _, side, _ in clean_stakeholders if side == SIDE_BUYER)
+    vendor_count = sum(1 for _, _, side, _ in clean_stakeholders if side == SIDE_VENDOR)
+    if buyer_count < 1 or vendor_count < 1:
+        raise DomainError("A contract needs at least one Buyer-side and one Vendor-side participant.")
 
     contract_id = new_id("CTR")
     timestamp = now()
@@ -97,18 +101,19 @@ def create_contract(
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 [new_id("SEC"), contract_id, section_title, content, position, timestamp],
             )
-        for index, (name, email, role) in enumerate(clean_stakeholders):
+        for index, (name, email, side, role) in enumerate(clean_stakeholders):
             stakeholder_id = new_id("STK")
             sql(
                 con,
-                """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, color, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, side, color, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     stakeholder_id,
                     contract_id,
                     name,
                     email,
                     role,
+                    side,
                     config.REVIEW_PALETTE[index % len(config.REVIEW_PALETTE)],
                     timestamp,
                 ],
@@ -196,7 +201,7 @@ def list_signatures(contract_id: str) -> list[dict]:
 
 
 def add_stakeholder(
-    contract_id: str, name: str, email: str, role: str, actor: Actor, color: str | None = None
+    contract_id: str, name: str, email: str, side: str, actor: Actor, color: str | None = None
 ) -> str:
     require_role(actor, {ROLE_ADMIN}, "Manage stakeholders")
     contract = get_contract(contract_id)
@@ -205,11 +210,11 @@ def add_stakeholder(
     require_not_frozen(contract, "Add stakeholder")
     name = _clean_text(name, "Stakeholder name")
     email = _clean_text(email, "Stakeholder email").lower()
-    role = str(role or "").strip().upper()
+    side = str(side or "").strip().upper()
+    if side not in SIDES:
+        raise DomainError(f"Unknown side: {side}. Use {SIDE_BUYER} or {SIDE_VENDOR}.")
     if not _EMAIL_RE.match(email):
         raise DomainError(f"Invalid stakeholder email: {email}")
-    if role not in ROLES:
-        raise DomainError(f"Unknown role: {role}")
     if fetch_one("SELECT 1 FROM stakeholders WHERE contract_id = ? AND lower(email) = ?", [contract_id, email]):
         raise DomainError(f"Stakeholder email already exists: {email}")
 
@@ -222,9 +227,9 @@ def add_stakeholder(
     with tx() as con:
         sql(
             con,
-            """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, color, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [stakeholder_id, contract_id, name, email, role, color, now()],
+            """INSERT INTO stakeholders (stakeholder_id, contract_id, name, email, role, side, color, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [stakeholder_id, contract_id, name, email, ROLE_STAKEHOLDER, side, color, now()],
         )
         sql(
             con,
@@ -238,7 +243,7 @@ def add_stakeholder(
             actor=actor,
             event_type=E_STAKEHOLDER_ADDED,
             target_id=stakeholder_id,
-            after_value={"name": name, "email": email, "role": role, "color": color, "approval": APPROVAL_PENDING},
+            after_value={"name": name, "email": email, "side": side, "color": color, "approval": APPROVAL_PENDING},
         )
         # A new reviewer always starts with a PENDING approval, which keeps the
         # approval gate honest; re-evaluate in case the roster changed mid-approval.
@@ -282,15 +287,24 @@ def remove_stakeholder(contract_id: str, stakeholder_id: str, actor: Actor) -> N
     )
     if stakeholder is None:
         raise DomainError("Stakeholder not found.")
-    remaining = fetch_all("SELECT stakeholder_id FROM stakeholders WHERE contract_id = ?", [contract_id])
-    if len(remaining) <= 1:
-        raise DomainError("A contract must keep at least one stakeholder.")
+    remaining = fetch_all(
+        "SELECT stakeholder_id, side FROM stakeholders WHERE contract_id = ?", [contract_id]
+    )
+    others = [row for row in remaining if row["stakeholder_id"] != stakeholder_id]
+    if len(others) < 1:
+        raise DomainError("A contract must keep at least one participant.")
+    other_sides = {row["side"] for row in others}
+    if SIDE_BUYER not in other_sides or SIDE_VENDOR not in other_sides:
+        raise DomainError(
+            "A contract must keep at least one Buyer-side and one Vendor-side participant; "
+            "this removal would leave only one side."
+        )
     approvals = fetch_all(
         "SELECT * FROM approvals WHERE contract_id = ? AND stakeholder_id = ?",
         [contract_id, stakeholder_id],
     )
     if any(row["status"] != APPROVAL_PENDING for row in approvals):
-        raise DomainError("This stakeholder already participated in approval and cannot be removed.")
+        raise DomainError("This participant already participated in approval and cannot be removed.")
 
     with tx() as con:
         sql(con, "DELETE FROM approvals WHERE stakeholder_id = ?", [stakeholder_id])

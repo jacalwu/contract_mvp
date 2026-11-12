@@ -13,7 +13,6 @@ from core.constants import (
     IN_REVIEW,
     PENDING_APPROVAL,
     ROLE_ADMIN,
-    ROLE_APPROVER,
     Actor,
     now,
 )
@@ -33,7 +32,7 @@ def list_approvals(contract_id: str) -> list[dict]:
 
 
 def submit_for_approval(contract_id: str, actor: Actor) -> None:
-    require_role(actor, {ROLE_ADMIN, ROLE_APPROVER}, "Submit for approval")
+    require_role(actor, {ROLE_ADMIN}, "Submit for approval")
     contract = get_contract(contract_id)
     require_status(contract, {IN_REVIEW}, "Submit for approval")
     with tx() as con:
@@ -42,13 +41,19 @@ def submit_for_approval(contract_id: str, actor: Actor) -> None:
 
 
 def decide_approval(approval_id: str, approved: bool, actor: Actor) -> bool:
-    """Grant or reject one stakeholder approval. Returns True if the contract became APPROVED."""
-    require_role(actor, {ROLE_APPROVER, ROLE_ADMIN}, "Approve contract")
+    """Grant or reject one stakeholder approval. Returns True if the contract became APPROVED.
+
+    A participant records their own side's sign-off; the Admin may sign on behalf
+    of a missing party. The contract reaches APPROVED only when at least one Buyer
+    and one Vendor have approved.
+    """
     row = fetch_one("SELECT * FROM approvals WHERE approval_id = ?", [approval_id])
     if row is None:
         raise DomainError("Approval record not found.")
     contract = get_contract(row["contract_id"])
     require_status(contract, {PENDING_APPROVAL}, "Record approval decision")
+    if actor.role != ROLE_ADMIN and actor.id != row["stakeholder_id"]:
+        raise DomainError("Only the assigned party (or an Admin) can record this approval.")
     if approved and row["status"] == APPROVAL_APPROVED:
         raise DomainError("This stakeholder already approved.")
 
@@ -72,7 +77,7 @@ def decide_approval(approval_id: str, approved: bool, actor: Actor) -> bool:
 
 
 def revoke_approval(approval_id: str, actor: Actor) -> None:
-    require_role(actor, {ROLE_APPROVER, ROLE_ADMIN}, "Revoke approval")
+    require_role(actor, {ROLE_ADMIN}, "Revoke approval")
     row = fetch_one("SELECT * FROM approvals WHERE approval_id = ?", [approval_id])
     if row is None:
         raise DomainError("Approval record not found.")

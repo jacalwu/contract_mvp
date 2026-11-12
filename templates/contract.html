@@ -47,10 +47,10 @@
 
   <h2>Parties</h2>
   <table>
-    <thead><tr><th>Name</th><th>Email</th><th>Role</th></tr></thead>
+    <thead><tr><th>Name</th><th>Email</th><th>Side</th></tr></thead>
     <tbody>
     {% for party in stakeholders %}
-      <tr><td>{{ party.name }}</td><td>{{ party.email }}</td><td>{{ party.role }}</td></tr>
+      <tr><td>{{ party.name }}</td><td>{{ party.email }}</td><td>{{ party.side }}</td></tr>
     {% endfor %}
     </tbody>
   </table>

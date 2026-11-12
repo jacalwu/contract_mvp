@@ -62,27 +62,48 @@ Future:
 DocuSign
 PandaDoc
 User Roles
-Stakeholder
+Each contract has four participants: two Buyer-side and two Vendor-side users.
+Buyer-side participant
 Can:
 
 Read Contract
 Comment
 Clarify
-Propose Change
+Propose Change (always recorded as a tracked change)
+Review & accept tracked changes proposed by the Vendor side
+Approve for the Buyer side
+
 Cannot:
 
-Finalize Contract
-Approver
+Approve for the Vendor side
+Write clause text directly (every edit is a tracked change)
+Vendor-side participant
 Can:
 
-Approve
-Reject
-Admin
+Read Contract
+Comment
+Clarify
+Propose Change (always recorded as a tracked change)
+Review & accept tracked changes proposed by the Buyer side
+Approve for the Vendor side
+
+Cannot:
+
+Approve for the Buyer side
+Write clause text directly
+Admin (neutral operator)
 Can:
 
-Manage Stakeholders
+Manage Stakeholders (add/remove, assign Buyer or Vendor side)
+Submit for approval and revoke approvals
 Lock Contracts
 Trigger PDF Generation
+Approve on behalf of either side when a party is unavailable
+
+Cannot:
+
+Skip the approval gate — a contract reaches APPROVED only with at least one Buyer and one Vendor approval
+Accept a clause change on behalf of the proposer's own side
 Contract Structure
 Contracts are not stored as Word documents.
 
@@ -204,10 +225,11 @@ After:
 Change Tracking
 Every modification creates a Change Request.
 
-Stakeholders propose changes via Change Requests (tracked changes). Admin/Approver may also
-apply direct edits while the contract is in DRAFT or IN_REVIEW — these are recorded as a
-MERGED change, bump the version and leave an in-document revision mark, so the audit trail
-and PDF export stay consistent with proposed changes.
+Participants on either side propose changes via Change Requests (tracked changes). Clause text is
+never written directly — no role, including the Admin, can bypass the review step. A change proposed
+by one side can only be accepted, rejected and merged by the opposite side; the proposer's own side
+cannot review it. Merging bumps the version and leaves an in-document revision mark, so the audit
+trail and PDF export stay consistent with the proposals.
 
 Workflow:
 

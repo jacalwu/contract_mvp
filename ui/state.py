@@ -13,9 +13,11 @@ from core.constants import (
     EDITABLE_STATUSES,
     FROZEN_STATUSES,
     ROLE_ADMIN,
-    ROLE_APPROVER,
     ROLE_LABELS,
     ROLE_STAKEHOLDER,
+    SIDE_BUYER,
+    SIDE_LABELS,
+    SIDE_VENDOR,
     STATUS_LABELS,
     Actor,
     DomainError,
@@ -74,7 +76,8 @@ def actor_label(actor_id: str | None, stakeholders: list[dict] | None = None) ->
         return f"{ADMIN_ACTOR.name} (Admin)"
     for party in stakeholders or []:
         if party["stakeholder_id"] == actor_id:
-            return f"{party['name']} ({ROLE_LABELS.get(party['role'], party['role'])})"
+            side = SIDE_LABELS.get(party.get("side"), party.get("side", ""))
+            return f"{party['name']} ({side})"
     return str(actor_id)
 
 
@@ -82,8 +85,14 @@ def can_admin(actor: Actor) -> bool:
     return actor.role == ROLE_ADMIN
 
 
+def is_participant(actor: Actor) -> bool:
+    return actor.role == ROLE_STAKEHOLDER and actor.side is not None
+
+
 def can_review(actor: Actor) -> bool:
-    return actor.role in (ROLE_ADMIN, ROLE_APPROVER)
+    """A participant or the Admin can act on reviews/approvals in general; the
+    actual per-change / per-approval rule is enforced by the service layer."""
+    return actor.role in (ROLE_ADMIN, ROLE_STAKEHOLDER)
 
 
 def is_editable(contract: dict) -> bool:
@@ -96,10 +105,10 @@ def can_discuss(contract: dict) -> bool:
 
 
 def _identity_options(contract_id: str) -> list[tuple[str, str]]:
-    options = [(ADMIN_ACTOR.id, f"{ADMIN_ACTOR.name} · {ROLE_LABELS[ROLE_ADMIN]}")]
+    options = [(ADMIN_ACTOR.id, f"{ADMIN_ACTOR.name} · Admin")]
     for party in list_stakeholders(contract_id):
-        label = f"{party['name']} · {ROLE_LABELS.get(party['role'], party['role'])}"
-        options.append((party["stakeholder_id"], label))
+        side = SIDE_LABELS.get(party.get("side"), party.get("side", ""))
+        options.append((party["stakeholder_id"], f"{party['name']} · {side}"))
     return options
 
 
@@ -151,7 +160,7 @@ def current_actor(contract_id: str) -> Actor:
         return ADMIN_ACTOR
     for party in list_stakeholders(contract_id):
         if party["stakeholder_id"] == actor_id:
-            return Actor(party["stakeholder_id"], party["name"], party["role"])
+            return Actor(party["stakeholder_id"], party["name"], party["role"], party["side"])
     return ADMIN_ACTOR
 
 
@@ -183,24 +192,28 @@ def run_action(action: Callable, *args, message: str = "Done", **kwargs) -> None
 
 
 def render_reviewer_manager(
-    contract_id: str, actor: Actor, stakeholders: list[dict], contract: dict
+    contract_id: str, actor: Actor, stakeholders: list[dict], contract: dict, key_prefix: str = "review"
 ) -> None:
     """Shared Admin panel for adding/removing reviewers on any open contract.
 
-    Rendered on both the Contract Viewer (where commenting happens) and Approvals.
+    Rendered on the Contract Viewer, the Approvals tab and the Document Review page.
+    Because Streamlit executes every tab body in one run, callers pass a distinct
+    ``key_prefix`` so the widget keys never collide.
     """
     keep_open = bool(st.session_state.pop("reviewers_panel_open", False))
     with st.expander(f"👥 Reviewers & stakeholders ({len(stakeholders)})", expanded=keep_open):
         st.caption(
             "Everyone listed here can switch to their identity in the sidebar to read the contract, "
-            "post comments and raise clarifications. Approvers can also review change requests "
-            "and approve the contract."
+            "post comments, raise clarifications and propose clause changes. A change proposed by one "
+            "side can only be accepted and merged by the opposite side, and the contract is APPROVED "
+            "once each side has at least one approval."
         )
         for party in stakeholders:
+            side_label = SIDE_LABELS.get(party.get("side"), party.get("side", ""))
             capability = (
-                "Approver - approves, reviews changes, comments"
-                if party["role"] == ROLE_APPROVER
-                else "Stakeholder - comments & clarifies"
+                "Buyer-side participant — proposes & reviews changes, comments, approves their side"
+                if party.get("side") == SIDE_BUYER
+                else "Vendor-side participant — proposes & reviews changes, comments, approves their side"
             )
             swatch = (
                 f"<span style='display:inline-block;width:10px;height:10px;border-radius:50%;"
@@ -208,40 +221,40 @@ def render_reviewer_manager(
             )
             st.markdown(
                 f"- {swatch}**{html.escape(str(party['name']))}** · {html.escape(str(party['email']))} "
-                f"· `{party['role']}` — {capability}"
+                f"· `{side_label}` — {capability}"
             )
 
         if contract["status"] in FROZEN_STATUSES:
-            st.info("This contract is approved or locked; reviewers can no longer be added or removed.")
+            st.info("This contract is approved or locked; participants can no longer be added or removed.")
             return
         if not can_admin(actor):
-            st.info("Switch to the Admin identity in the sidebar to add or remove reviewers.")
+            st.info("Switch to the Admin identity in the sidebar to add or remove participants.")
             return
 
         st.caption(
-            "New reviewers take effect immediately: they appear in the sidebar identity list and get "
-            "a PENDING approval, so the contract cannot become APPROVED until they approve too."
+            "New participants take effect immediately: they appear in the sidebar identity list and get "
+            "a PENDING approval, so the contract cannot become APPROVED until both sides have an approval."
         )
         columns = st.columns([2, 3, 2, 1])
-        name = columns[0].text_input("Name", key="reviewer_name", placeholder="Dana Reviewer")
-        email = columns[1].text_input("Email", key="reviewer_email", placeholder="dana@company.com")
-        role = columns[2].selectbox(
-            "Role",
-            [ROLE_APPROVER, ROLE_STAKEHOLDER],
-            format_func=lambda key: ROLE_LABELS[key],
-            key="reviewer_role",
-            help="Approvers can approve and review change requests; Stakeholders can comment and clarify. Both can comment.",
+        name = columns[0].text_input("Name", key=f"{key_prefix}_reviewer_name", placeholder="Dana Participant")
+        email = columns[1].text_input("Email", key=f"{key_prefix}_reviewer_email", placeholder="dana@company.com")
+        side = columns[2].selectbox(
+            "Side",
+            [SIDE_BUYER, SIDE_VENDOR],
+            format_func=lambda key: SIDE_LABELS[key],
+            key=f"{key_prefix}_reviewer_side",
+            help="Buyer-side or Vendor-side. Each side proposes changes that only the other side can accept.",
         )
-        if columns[3].button("Add reviewer", key="reviewer_add", width="stretch"):
+        if columns[3].button("Add participant", key=f"{key_prefix}_reviewer_add", width="stretch"):
             st.session_state["reviewers_panel_open"] = True
             run_action(
                 contract_service.add_stakeholder,
                 contract_id,
                 name,
                 email,
-                role,
+                side,
                 actor,
-                message="Reviewer added. They can comment now and must approve before the contract is APPROVED.",
+                message="Participant added. They can comment now; the contract needs an approval from each side to be APPROVED.",
             )
         if stakeholders:
             remove_id = st.selectbox(
@@ -251,9 +264,9 @@ def render_reviewer_manager(
                     (f"{row['name']} · {row['email']}" for row in stakeholders if row["stakeholder_id"] == sid),
                     sid,
                 ),
-                key="reviewer_remove_id",
+                key=f"{key_prefix}_reviewer_remove_id",
             )
-            if st.button("Remove selected reviewer", key="reviewer_remove"):
+            if st.button("Remove selected reviewer", key=f"{key_prefix}_reviewer_remove"):
                 st.session_state["reviewers_panel_open"] = True
                 run_action(
                     contract_service.remove_stakeholder,
@@ -275,7 +288,7 @@ def render_reviewer_manager(
                 format_func=lambda sid: next(
                     (row["name"] for row in stakeholders if row["stakeholder_id"] == sid), sid
                 ),
-                key="reviewer_color_target",
+                key=f"{key_prefix}_reviewer_color_target",
             )
             current_color = next(
                 (row["color"] for row in stakeholders if row["stakeholder_id"] == color_target),
@@ -287,9 +300,9 @@ def render_reviewer_manager(
                 palette,
                 index=palette.index(current_color) if current_color in palette else 0,
                 format_func=lambda value: config.PALETTE_LABELS.get(value, value),
-                key="reviewer_color_value",
+                key=f"{key_prefix}_reviewer_color_value",
             )
-            if color_columns[2].button("Apply", key="reviewer_color_apply", width="stretch"):
+            if color_columns[2].button("Apply", key=f"{key_prefix}_reviewer_color_apply", width="stretch"):
                 st.session_state["reviewers_panel_open"] = True
                 run_action(
                     contract_service.set_stakeholder_color,

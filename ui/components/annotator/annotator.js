@@ -330,7 +330,8 @@
     var dot = el("span", "dot");
     dot.style.cssText = "width:10px;height:10px;border-radius:50%;display:inline-block;background:" + p.actor.color;
     mine.appendChild(dot);
-    mine.appendChild(document.createTextNode(p.actor.name + " · " + p.actor.role));
+    var mineRole = p.actor.side_label && p.actor.side ? p.actor.side_label : (p.actor.role || "");
+    mine.appendChild(document.createTextNode(p.actor.name + (mineRole ? " · " + mineRole : "")));
     meta.appendChild(mine);
     bar.appendChild(meta);
     bar.appendChild(el("div", "spacer"));
@@ -341,7 +342,7 @@
         modeButton("Review", "view", "Read, comment and track changes")
       );
       modes.appendChild(
-        modeButton(p.can_edit ? "Edit" : "Suggest edits", "edit", "Edit the document with the toolbar")
+        modeButton("Edit (tracked)", "edit", "Edit the document; changes are submitted as tracked changes for the opposite party")
       );
       bar.appendChild(modes);
     }
@@ -393,7 +394,8 @@
       swatch.style.background = person.color;
       chip.appendChild(swatch);
       chip.appendChild(el("span", "nm", person.name));
-      chip.appendChild(el("span", "role", "· " + person.role));
+      var personRole = person.side_label && person.side ? person.side_label : (person.role || "");
+      chip.appendChild(el("span", "role", "· " + personRole));
       legend.appendChild(chip);
     });
     return legend;
@@ -490,8 +492,8 @@
     });
     box.appendChild(body);
 
-    var canReview = state.data.can_review_changes && change.status === "PENDING";
-    var canMerge = state.data.can_review_changes && change.status === "APPROVED";
+    var canReview = change.can_review;
+    var canMerge = change.can_merge;
     if (canReview || canMerge) {
       var actions = el("div", "chg-actions");
       if (canReview) {
@@ -581,9 +583,7 @@
 
     var save = el("button", "btn primary", "Save changes");
     save.id = "save-btn";
-    save.title = state.data.can_edit
-      ? "Save directly: version +1 and the edit is marked as yours"
-      : "Submit your edits as tracked changes for approval";
+    save.title = "Submit your edits as tracked changes for the opposite party to accept and merge";
     save.disabled = !state.dirty;
     save.addEventListener("click", saveEdits);
     bar.appendChild(save);
@@ -860,7 +860,7 @@
     state.dirty = false;
     state.pendingPayload = null;
     refreshSaveBtn();
-    emit({ action: "save_edits", edits: edits, direct: !!state.data.can_edit });
+    emit({ action: "save_edits", edits: edits });
   }
 
   /* ---------------- line numbers ---------------- */

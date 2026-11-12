@@ -127,12 +127,13 @@ def main() -> int:
         step(page, "send for signature", "Send for signature", seconds=3)
         if "SIGNING" not in body(page):
             failures.append("signature request was not sent")
-        for index in range(3):
+        for index in range(8):
+            if "Executed · EXECUTED" in body(page):
+                break
             if not click(page, "Simulate signature"):
-                failures.append(f"signing #{index + 1} button not available")
                 break
             wait(page, 2)
-        if "EXECUTED" not in body(page) and "Executed" not in body(page):
+        if "Executed · EXECUTED" not in body(page):
             failures.append("contract did not reach EXECUTED")
 
         nav(page, "Timeline")

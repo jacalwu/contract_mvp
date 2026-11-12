@@ -89,9 +89,9 @@ def main() -> int:
             _wait(page, 1.5)
             page.get_by_text("Reviewers & stakeholders", exact=False).first.click(timeout=10_000)
             _wait(page, 1)
-            page.get_by_placeholder("Dana Reviewer").first.fill("Dana Reviewer")
+            page.get_by_placeholder("Dana Participant").first.fill("Dana Reviewer")
             page.get_by_placeholder("dana@company.com").first.fill("dana@company.com")
-            page.get_by_role("button", name="Add reviewer").first.click(timeout=10_000)
+            page.get_by_role("button", name="Add participant").first.click(timeout=10_000)
             _wait(page, 3)
             body = _check(page, "viewer-added-reviewer", failures)
             if "Dana Reviewer" not in body:

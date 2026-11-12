@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS stakeholders (
     contract_id VARCHAR NOT NULL,
     name VARCHAR NOT NULL,
     email VARCHAR NOT NULL,
-    role VARCHAR NOT NULL,               -- STAKEHOLDER | APPROVER
+    role VARCHAR NOT NULL,               -- STAKEHOLDER (all participants) - ADMIN is separate
+    side VARCHAR NOT NULL,               -- BUYER | VENDOR: the party this participant represents
     color VARCHAR,                       -- + annotation colour used for this reviewer
     created_at TIMESTAMP NOT NULL
 );

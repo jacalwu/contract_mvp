@@ -201,7 +201,7 @@ def _plain_lines(contract: dict, sections: list[dict], stakeholders: list[dict],
         "",
         "PARTIES",
     ]
-    lines += [f"- {item['name']} <{item['email']}> ({item['role']})" for item in stakeholders]
+    lines += [f"- {item['name']} <{item['email']}> ({item['side']})" for item in stakeholders]
     lines += ["", "TERMS", ""]
     for index, section in enumerate(sections, start=1):
         lines.append(f"{index}. {section['title']}")

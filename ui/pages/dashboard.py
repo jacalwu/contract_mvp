@@ -11,6 +11,10 @@ from core.constants import (
     IN_REVIEW,
     LOCKED,
     PENDING_APPROVAL,
+    SIDE_BUYER,
+    SIDE_LABELS,
+    SIDE_VENDOR,
+    SIDES,
     STATUS_LABELS,
     DomainError,
 )
@@ -20,9 +24,10 @@ DEFAULT_SECTIONS = """Scope of Work | Vendor shall deliver the analytics platfor
 Payment Terms | Payment within 30 days.
 Liability Cap | Total liability shall not exceed fees paid in the preceding 12 months."""
 
-DEFAULT_STAKEHOLDERS = """Alice Chen, alice@party-a.com, APPROVER
-Bob Lee, bob@party-b.com, STAKEHOLDER
-Carol Wong, carol@legal.com, APPROVER"""
+DEFAULT_STAKEHOLDERS = """Alice Chen, alice@buyer.com, BUYER
+Bob Tan, bob@buyer.com, BUYER
+Carol Wong, carol@vendor.com, VENDOR
+Dave Lim, dave@vendor.com, VENDOR"""
 
 
 def _parse_sections(raw: str) -> list[dict[str, str]]:
@@ -44,14 +49,11 @@ def _parse_stakeholders(raw: str) -> list[dict[str, str]]:
             continue
         parts = [part.strip() for part in line.split(",")]
         if len(parts) < 2:
-            raise DomainError(f"Invalid stakeholder line: {line} (expected: name, email, role)")
-        items.append(
-            {
-                "name": parts[0],
-                "email": parts[1],
-                "role": (parts[2] if len(parts) > 2 else "APPROVER").upper(),
-            }
-        )
+            raise DomainError(f"Invalid participant line: {line} (expected: name, email, side)")
+        side = (parts[2] if len(parts) > 2 else SIDE_BUYER).upper()
+        if side not in SIDES:
+            raise DomainError(f"Unknown side: {side} (expected BUYER or VENDOR)")
+        items.append({"name": parts[0], "email": parts[1], "side": side})
     return items
 
 
@@ -63,7 +65,7 @@ def _create_block(actor) -> None:
         title = st.text_input("Contract title", value="Master Service Agreement", key="new_contract_title")
         st.caption("Sections: one per line, `Title | Content`")
         sections_raw = st.text_area("Sections", value=DEFAULT_SECTIONS, height=110, key="new_sections")
-        st.caption("Stakeholders: one per line, `name, email, role(APPROVER/STAKEHOLDER)`; at least one APPROVER")
+        st.caption("Participants: one per line, `name, email, side(BUYER/VENDOR)`; at least one of each side")
         stakeholders_raw = st.text_area(
             "Stakeholders", value=DEFAULT_STAKEHOLDERS, height=90, key="new_stakeholders"
         )
@@ -106,11 +108,11 @@ def _flow_block(contract_id: str, contract: dict, actor) -> None:
                 st.caption("Waiting for an Admin to submit for review")
     with columns[1]:
         if status == IN_REVIEW:
-            if can_review(actor):
+            if can_admin(actor):
                 if st.button("Submit for approval → PENDING_APPROVAL", width="stretch"):
-                    run_action(approval_service.submit_for_approval, contract_id, actor, message="Submitted for multi-party approval")
+                    run_action(approval_service.submit_for_approval, contract_id, actor, message="Submitted for cross-side approval")
             else:
-                st.caption("Waiting for an Approver to submit for approval")
+                st.caption("Waiting for an Admin to submit for approval")
     with columns[2]:
         if status == APPROVED:
             if can_admin(actor):
@@ -168,11 +170,12 @@ def render() -> None:
     info[1].metric("Status", STATUS_LABELS.get(contract["status"], contract["status"]))
     info[2].metric("Stakeholders", len(stakeholders))
     info[3].metric("Contract ID", contract_id[-8:])
-    with st.expander("Stakeholder list", expanded=False):
+    with st.expander("Participant list", expanded=False):
         for party in stakeholders:
-            st.write(f"- **{party['name']}** · {party['email']} · `{party['role']}`")
+            side = SIDE_LABELS.get(party.get("side"), party.get("side", ""))
+            st.write(f"- **{party['name']}** · {party['email']} · `{side}`")
         st.caption(
-            "Need more reviewers? Use **Reviewers & stakeholders** on the Contract Viewer "
-            "or Approvals page (Admin identity). New reviewers can comment immediately."
+            "Need more participants? Use **Reviewers & stakeholders** on the Contract Viewer "
+            "or Approvals page (Admin identity). New participants can comment immediately."
         )
     _flow_block(contract_id, contract, actor)

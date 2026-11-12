@@ -1,30 +1,22 @@
 """Document editing: the word-processor side of the review surface.
 
-Reviewers can restructure a clause (headings, lists, tables, whole paragraphs),
-so the document needs a write path that is not a diff of one selection. Two
-rules keep it honest:
-
-* Direct writes are limited to DRAFT / IN_REVIEW and to the people who own the
-  document (Admin, Approver). Stakeholders keep submitting tracked changes.
-* A direct write still leaves a *merged* change row, so the version bump, the
-  change history and the "Revised by X on ..." marks in the document all work
-  exactly as they do for an approved change.
+Clause text is never written directly. Whole-section rewrites and inline range
+edits are submitted as tracked changes (change requests) and only merged into the
+document after the *opposite* party accepts them. Structural operations
+(add / delete / move / rename a section) are document-level edits kept to the
+Admin so participants negotiate clause text through the track-changes flow.
 """
 from __future__ import annotations
 
 from core.audit import log_event
 from core.constants import (
-    CHANGE_MERGED,
     E_SECTION_ADDED,
-    E_SECTION_EDITED,
     E_SECTION_MOVED,
     E_SECTION_REMOVED,
     E_SECTION_RENAMED,
     OP_DELETE,
-    OP_INSERT,
     OP_UPDATE,
     ROLE_ADMIN,
-    ROLE_APPROVER,
     Actor,
     DomainError,
     new_id,
@@ -33,7 +25,7 @@ from core.constants import (
 from core.workflow import bump_version, get_contract, require_editable, require_role
 from db.database import fetch_one, sql, tx
 
-_EDIT_ROLES = {ROLE_ADMIN, ROLE_APPROVER}
+_EDIT_ROLES = {ROLE_ADMIN}
 
 
 def _guards(contract_id: str, actor: Actor, action: str) -> dict:
@@ -64,69 +56,6 @@ def _ordered_ids(con, contract_id: str) -> list[str]:
     return [row[0] for row in rows]
 
 
-def _operation(before: str, after: str) -> str:
-    if before and before in after and len(after) > len(before):
-        return OP_INSERT
-    if len(after) < len(before):
-        return OP_DELETE
-    return OP_UPDATE
-
-
-def apply_edit(
-    contract_id: str,
-    section_id: str,
-    before_content: str,
-    after_content: str,
-    actor: Actor,
-    note: str = "",
-) -> dict:
-    """Save a rewritten section and record it as a merged change."""
-    contract = _guards(contract_id, actor, "Edit the document")
-    section = _section(section_id, contract_id)
-    if (section["content"] or "") != (before_content or ""):
-        raise DomainError("This clause changed while you were editing; reload and re-apply your edit.")
-    if (after_content or "").strip() == (before_content or "").strip():
-        raise DomainError("Nothing to save — the text did not change.")
-
-    operation = _operation(before_content or "", after_content or "")
-    change_id = new_id("CHG")
-    stamp = now()
-    with tx() as con:
-        sql(
-            con,
-            """INSERT INTO change_requests
-               (change_id, contract_id, section_id, operation, before_content, after_content,
-                requested_by, status, created_at, reviewed_by, reviewed_at, merged_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                change_id,
-                contract_id,
-                section_id,
-                operation,
-                before_content,
-                after_content,
-                actor.id,
-                CHANGE_MERGED,
-                stamp,
-                actor.id,
-                stamp,
-                stamp,
-            ],
-        )
-        sql(con, "UPDATE sections SET content = ? WHERE section_id = ?", [after_content, section_id])
-        version = bump_version(con, contract)
-        log_event(
-            con,
-            contract_id=contract_id,
-            actor=actor,
-            event_type=E_SECTION_EDITED,
-            target_id=section_id,
-            before_value={"content": before_content, "version": contract["version"]},
-            after_value={"content": after_content, "version": version, "operation": operation, "note": note},
-        )
-    return {"change_id": change_id, "version": version, "operation": operation}
-
-
 def apply_range(
     contract_id: str,
     section_id: str,
@@ -139,8 +68,7 @@ def apply_range(
 
     This always produces a tracked change: "suggest" means propose, and the
     approval gate must see it. Whole-section rewrites from the editor take the
-    direct path in :func:`apply_edit` instead, which is limited to document
-    owners.
+    same tracked-change path via :func:`core.changes.propose_change`.
     """
     from core import changes as change_service
     from core import richtext

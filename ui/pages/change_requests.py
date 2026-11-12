@@ -14,8 +14,8 @@ from core.constants import (
     OPERATION_LABELS,
     DomainError,
 )
-from core.workflow import FROZEN_STATUSES
-from ui.state import actor_label, can_review, get_context, is_editable, run_action, status_badge
+from core.workflow import FROZEN_STATUSES, can_review_change_for
+from ui.state import actor_label, get_context, is_editable, run_action, status_badge
 
 _CHANGE_STYLES = {
     CHANGE_PENDING: ("#fef3c7", "#92400e"),
@@ -32,7 +32,8 @@ def _fmt(value) -> str:
 def _proposal_form(contract_id: str, sections: list[dict], actor) -> None:
     with st.container(border=True):
         st.subheader("Submit change request")
-        st.caption("All edits are submitted as Change Requests and merged by an Approver; clause text is never edited directly. Press Ctrl+Enter (or click outside) to apply text box input.")
+        st.caption("All edits are submitted as Change Requests; clause text is never edited directly. "
+                   "A change you propose can only be accepted and merged by the opposite party.")
         if not sections:
             st.warning("This contract has no sections.")
             return
@@ -108,17 +109,26 @@ def _change_card(
             for sign, line in change_service.diff_lines(row["before_content"], row["after_content"]):
                 st.text(f"{sign} {line}")
 
-        if contract_frozen or not can_review(actor):
-            return
-        buttons = st.columns([1, 1, 1, 5])
+        # Cross-side review: a change is accepted/merged only by the opposite party.
+        side_by_id = {party["stakeholder_id"]: party.get("side") for party in stakeholders}
+        proposer_side = side_by_id.get(row["requested_by"])
+        can_review_row = (not contract_frozen) and can_review_change_for(actor, proposer_side)
         if row["status"] == CHANGE_PENDING:
-            if buttons[0].button("Accept", key=f"accept_{row['change_id']}"):
-                run_action(change_service.review_change, row["change_id"], True, actor, message="Change accepted")
-            if buttons[1].button("Reject", key=f"reject_{row['change_id']}"):
-                run_action(change_service.review_change, row["change_id"], False, actor, message="Change rejected")
+            if can_review_row:
+                buttons = st.columns([1, 1, 1, 5])
+                if buttons[0].button("Accept", key=f"accept_{row['change_id']}"):
+                    run_action(change_service.review_change, row["change_id"], True, actor, message="Change accepted")
+                if buttons[1].button("Reject", key=f"reject_{row['change_id']}"):
+                    run_action(change_service.review_change, row["change_id"], False, actor, message="Change rejected")
+            elif not contract_frozen:
+                st.caption("Only the opposite party (the other side) can accept or reject this change.")
         elif row["status"] == CHANGE_APPROVED:
-            if buttons[2].button("Merge into text → version +1", type="primary", key=f"merge_{row['change_id']}"):
-                run_action(change_service.merge_change, row["change_id"], actor, message="Change merged; contract version updated")
+            if can_review_row:
+                buttons = st.columns([1, 1, 1, 5])
+                if buttons[2].button("Merge into text → version +1", type="primary", key=f"merge_{row['change_id']}"):
+                    run_action(change_service.merge_change, row["change_id"], actor, message="Change merged; contract version updated")
+            elif not contract_frozen:
+                st.caption("Only the opposite party can merge this change.")
         elif row["status"] == CHANGE_MERGED:
             st.caption(f"Merged at: {_fmt(row['merged_at'])}")
 
@@ -142,7 +152,10 @@ def render() -> None:
     if not rows:
         st.info("No change requests yet.")
         return
-    if not can_review(actor):
-        st.caption("You are viewing as a Stakeholder (read-only). Switch to an Approver / Admin identity to review and merge.")
+    if actor.role == "STAKEHOLDER":
+        st.caption(
+            "Changes are reviewed cross-side: a change you propose can only be accepted and merged by the "
+            "opposite party. Switch identities in the sidebar to act on the other side's changes."
+        )
     for row in rows:
         _change_card(row, actor, stakeholders, frozen)

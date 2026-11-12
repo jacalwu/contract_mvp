@@ -23,11 +23,13 @@ from core.constants import (
     EDITABLE_STATUSES,
     FROZEN_STATUSES,
     ROLE_ADMIN,
-    ROLE_APPROVER,
+    ROLE_STAKEHOLDER,
     ROLE_LABELS,
+    SIDE_LABELS,
     STATUS_LABELS,
     Actor,
 )
+from core.workflow import can_review_change_for
 from db.database import fetch_all, fetch_one
 
 _MARKUP = re.compile(r"(\*\*|__|~~|\+\+|`|\|)")
@@ -52,10 +54,19 @@ def _people(contract_id: str, actor: Actor) -> dict[str, dict]:
             "name": party["name"],
             "role": party["role"],
             "role_label": ROLE_LABELS.get(party["role"], party["role"]),
+            "side": party["side"],
+            "side_label": SIDE_LABELS.get(party["side"], party["side"]),
             "color": party["color"] or config.REVIEW_PALETTE[index % len(config.REVIEW_PALETTE)],
         }
     if actor.id not in people:
-        people[actor.id] = {"name": actor.name, "role": actor.role, "role_label": actor.role, "color": config.ADMIN_COLOR}
+        people[actor.id] = {
+            "name": actor.name,
+            "role": actor.role,
+            "role_label": actor.role,
+            "side": actor.side,
+            "side_label": SIDE_LABELS.get(actor.side, actor.side) if actor.side else "",
+            "color": config.ADMIN_COLOR,
+        }
     return people
 
 
@@ -261,6 +272,7 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
     change_payload = []
     for row in change_rows:
         author = people.get(row["requested_by"], {"name": row["requested_by"], "color": config.ADMIN_COLOR})
+        proposer_side = author.get("side")
         change_payload.append(
             {
                 "id": row["change_id"],
@@ -276,15 +288,25 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
                 "before": row["before_content"],
                 "after": row["after_content"],
                 "diff": diff_ops(row["before_content"], row["after_content"]),
+                "can_review": contract["status"] not in FROZEN_STATUSES
+                and row["status"] == CHANGE_PENDING
+                and can_review_change_for(actor, proposer_side),
+                "can_merge": contract["status"] not in FROZEN_STATUSES
+                and row["status"] == CHANGE_APPROVED
+                and can_review_change_for(actor, proposer_side),
             }
         )
 
     can_annotate = contract["status"] in DISCUSSION_STATUSES
     can_propose = contract["status"] in EDITABLE_STATUSES
-    can_review_changes = contract["status"] not in FROZEN_STATUSES and actor.role in (ROLE_APPROVER, ROLE_ADMIN)
-    # Direct edits (no approval round-trip) are limited to people who own the
-    # document; everyone else keeps the tracked-change path.
-    can_edit = contract["status"] in EDITABLE_STATUSES and actor.role in (ROLE_ADMIN, ROLE_APPROVER)
+    can_review_changes = contract["status"] not in FROZEN_STATUSES and actor.role in (
+        ROLE_ADMIN,
+        ROLE_STAKEHOLDER,
+    )
+    # The editor submits tracked changes for every participant (and the Admin), so
+    # it is available to anyone while the contract is editable. Nothing is written
+    # directly anymore — the opposite party must accept and merge.
+    can_edit = contract["status"] in EDITABLE_STATUSES
     return {
         "contract": {
             "id": contract_id,
@@ -310,6 +332,8 @@ def build_payload(contract_id: str, actor: Actor) -> dict:
             "id": actor.id,
             "name": actor.name,
             "role": ROLE_LABELS.get(actor.role, actor.role),
+            "side": actor.side,
+            "side_label": SIDE_LABELS.get(actor.side, actor.side) if actor.side else "",
             "color": people.get(actor.id, {}).get("color", config.ADMIN_COLOR),
         },
         "palette": [{"color": color, "label": config.PALETTE_LABELS.get(color, color)} for color in config.REVIEW_PALETTE],

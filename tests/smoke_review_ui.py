@@ -251,12 +251,10 @@ def main() -> int:
             frame.locator("#save-btn").click()
             _wait(page, 6)
             body = page.locator("body").inner_text()
-            assert "Saved" in body, body[:400]
+            assert "tracked changes" in body, body[:400]
             frame = _component(page)
-            assert frame.locator(".pill", has_text="v").count() >= 1
-            assert frame.evaluate("document.querySelectorAll('.paper table').length") >= 1
-            assert frame.evaluate("document.querySelectorAll('.paper strong').length") >= 1
-            print("[OK] editor saved bold text and an inserted table (version bumped)")
+            assert frame.evaluate("document.querySelectorAll('.change').length") >= 1
+            print("[OK] editor save submits tracked changes (nothing written directly)")
         except Exception as exc:
             failures.append(f"editor: {_detail(exc)}")
 

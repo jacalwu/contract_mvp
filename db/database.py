@@ -14,6 +14,19 @@ _conn: duckdb.DuckDBPyConnection | None = None
 _lock = threading.RLock()
 
 
+def _statements() -> list[str]:
+    """Split the schema into single statements.
+
+    Line comments (``-- ...``) are stripped first so that a semicolon inside a
+    comment can never truncate the statement it sits in.
+    """
+    lines = []
+    for line in _SCHEMA_SQL.splitlines():
+        cut = line.find("--")
+        lines.append(line[:cut] if cut != -1 else line)
+    return [part.strip() for part in "\n".join(lines).split(";") if part.strip()]
+
+
 def get_conn() -> duckdb.DuckDBPyConnection:
     """Lazily create the process-wide connection and apply idempotent DDL."""
     global _conn
@@ -22,9 +35,8 @@ def get_conn() -> duckdb.DuckDBPyConnection:
             if _conn is None:
                 config.init_dirs()
                 con = duckdb.connect(str(config.DB_PATH))
-                for statement in _SCHEMA_SQL.split(";"):
-                    if statement.strip():
-                        con.execute(statement)
+                for statement in _statements():
+                    con.execute(statement)
                 _migrate(con)
                 _conn = con
     return _conn
@@ -39,6 +51,7 @@ _MIGRATIONS = (
     ("comments", "quoted_text", "VARCHAR"),
     ("comments", "color", "VARCHAR"),
     ("comments", "resolved_at", "TIMESTAMP"),
+    ("stakeholders", "side", "VARCHAR"),
 )
 
 
@@ -54,6 +67,27 @@ def _migrate(con: duckdb.DuckDBPyConnection) -> None:
             "UPDATE stakeholders SET color = ? WHERE stakeholder_id = ?",
             [config.REVIEW_PALETTE[index % len(config.REVIEW_PALETTE)], stakeholder_id],
         )
+    # Backfill side on contracts created before the buyer/vendor split: alternate
+    # sides within each contract so an existing roster stays balanced (BUYER, VENDOR, …).
+    con.execute(
+        """
+        UPDATE stakeholders
+        SET side = m.side
+        FROM (
+            SELECT
+                stakeholder_id,
+                CASE WHEN (ROW_NUMBER() OVER (PARTITION BY contract_id ORDER BY created_at, email)) % 2 = 1
+                     THEN 'BUYER' ELSE 'VENDOR' END AS side
+            FROM stakeholders
+            WHERE side IS NULL
+        ) m
+        WHERE stakeholders.stakeholder_id = m.stakeholder_id
+        """
+    )
+    # Any remaining NULLs (e.g. a single-stakeholder contract) default to BUYER so the
+    # NOT NULL constraint is satisfied; those contracts simply cannot reach APPROVED
+    # until a VENDOR is added.
+    con.execute("UPDATE stakeholders SET side = 'BUYER' WHERE side IS NULL")
 
 
 def sql(con: duckdb.DuckDBPyConnection, statement: str, params: Sequence[Any] = ()):

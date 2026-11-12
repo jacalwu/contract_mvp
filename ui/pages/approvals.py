@@ -9,11 +9,13 @@ from core.constants import (
     DRAFT,
     IN_REVIEW,
     PENDING_APPROVAL,
+    ROLE_ADMIN,
     ROLE_LABELS,
+    SIDE_LABELS,
 )
 from ui.state import (
     actor_label,
-    can_review,
+    can_admin,
     get_context,
     render_reviewer_manager,
     run_action,
@@ -34,13 +36,16 @@ def _gate_block(contract_id: str) -> None:
     if gate["ready"]:
         st.success("All three rules are satisfied; a contract in PENDING_APPROVAL automatically becomes APPROVED.")
     else:
-        st.info("A contract only reaches APPROVED when there are no OPEN clarifications, no unmerged changes, and all stakeholders have approved.")
+        st.info(
+            "A contract only reaches APPROVED when there are no OPEN clarifications, no unmerged changes, "
+            "and each side (Buyer and Vendor) has at least one approval."
+        )
     return gate
 
 
 def render() -> None:
     st.title("✅ Approvals")
-    st.caption("Multi-party approval · Status · Decision time · Stakeholder management")
+    st.caption("Cross-side sign-off · Status · Decision time · Participant management")
     contract_id, actor, contract, stakeholders = get_context()
     st.markdown(status_badge(contract["status"]), unsafe_allow_html=True)
 
@@ -49,16 +54,16 @@ def render() -> None:
     gate = _gate_block(contract_id)
 
     st.divider()
-    st.subheader("Stakeholder approval status")
+    st.subheader("Participant approval status")
     rows = gate["approvals"]
     if not rows:
         st.warning("No approval records yet.")
     else:
         table = [
             {
-                "Stakeholders": row["stakeholder_name"],
+                "Participant": row["stakeholder_name"],
                 "Email": row["email"],
-                "Role": ROLE_LABELS.get(row["role"], row["role"]),
+                "Side": SIDE_LABELS.get(row.get("side"), row.get("side", "")),
                 "Approval status": row["status"],
                 "Decided by": actor_label(row["decided_by"], stakeholders),
                 "Approved at": _fmt(row["approved_at"]),
@@ -67,13 +72,19 @@ def render() -> None:
         ]
         st.dataframe(table, hide_index=True, width="stretch")
 
-    can_decide = can_review(actor) and contract["status"] == PENDING_APPROVAL
+    in_approval = contract["status"] == PENDING_APPROVAL
     for row in rows:
         with st.container(border=True):
             columns = st.columns([3, 2, 1, 1, 1])
-            columns[0].write(f"**{row['stakeholder_name']}** · {row['email']} · `{row['role']}`")
+            side = SIDE_LABELS.get(row.get("side"), row.get("side", ""))
+            columns[0].write(f"**{row['stakeholder_name']}** · {row['email']} · `{side}`")
             columns[1].write(f"`{row['status']}` · {_fmt(row['approved_at'])}")
-            if not can_decide:
+            # A participant records their own side's sign-off; the Admin may act for anyone.
+            is_owner = actor.role != ROLE_ADMIN and actor.id != row["stakeholder_id"]
+            if not in_approval:
+                continue
+            if is_owner:
+                st.caption("Only the assigned participant (or an Admin) can record this approval.")
                 continue
             if columns[2].button("Approve", key=f"grant_{row['approval_id']}", disabled=row["status"] == APPROVAL_APPROVED):
                 run_action(
@@ -89,7 +100,7 @@ def render() -> None:
                     row["approval_id"],
                     False,
                     actor,
-                    message="Approval rejected for this stakeholder",
+                    message="Approval rejected for this participant",
                 )
             if columns[4].button(
                 "Revoke", key=f"revoke_{row['approval_id']}", disabled=row["status"] != APPROVAL_APPROVED
@@ -100,8 +111,11 @@ def render() -> None:
                     actor,
                     message="Approval revoked",
                 )
-    if not can_decide and contract["status"] == PENDING_APPROVAL:
-        st.caption("The current identity cannot approve, or the contract is not in PENDING_APPROVAL. Switch to an Approver / Admin in the sidebar.")
+    if in_approval and not can_admin(actor):
+        st.caption(
+            "Switch to a participant identity on the sidebar to record your side's approval, "
+            "or to the Admin identity to act for any party."
+        )
 
     st.divider()
-    render_reviewer_manager(contract_id, actor, stakeholders, contract)
+    render_reviewer_manager(contract_id, actor, stakeholders, contract, key_prefix="approvals")

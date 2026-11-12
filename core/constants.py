@@ -14,13 +14,24 @@ class DomainError(Exception):
 class Actor:
     id: str
     name: str
-    role: str  # ADMIN | APPROVER | STAKEHOLDER
+    role: str  # ADMIN | STAKEHOLDER (participants are all STAKEHOLDER; ADMIN is the neutral operator)
+    side: str | None = None  # None for ADMIN; SIDE_BUYER | SIDE_VENDOR for participants
 
 
 ROLE_ADMIN = "ADMIN"
-ROLE_APPROVER = "APPROVER"
+ROLE_APPROVER = "APPROVER"  # legacy: retained for back-compat / migrations only
 ROLE_STAKEHOLDER = "STAKEHOLDER"
 ROLES = (ROLE_ADMIN, ROLE_APPROVER, ROLE_STAKEHOLDER)
+
+# Contract parties are split into two sides. Every participant belongs to one side;
+# the ADMIN is the neutral platform operator and belongs to neither.
+SIDE_BUYER = "BUYER"
+SIDE_VENDOR = "VENDOR"
+SIDES = (SIDE_BUYER, SIDE_VENDOR)
+SIDE_LABELS = {
+    SIDE_BUYER: "Buyer",
+    SIDE_VENDOR: "Vendor",
+}
 
 DRAFT = "DRAFT"
 IN_REVIEW = "IN_REVIEW"

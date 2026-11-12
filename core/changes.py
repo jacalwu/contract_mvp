@@ -22,8 +22,6 @@ from core.constants import (
     OP_DELETE,
     OP_INSERT,
     OP_UPDATE,
-    ROLE_ADMIN,
-    ROLE_APPROVER,
     Actor,
     DomainError,
     new_id,
@@ -31,11 +29,11 @@ from core.constants import (
 )
 from core.workflow import (
     bump_version,
+    can_review_change_for,
     evaluate_contract_approval,
     get_contract,
     require_editable,
     require_not_frozen,
-    require_role,
 )
 from db.database import fetch_all, fetch_one, sql, tx
 
@@ -158,14 +156,22 @@ def list_changes(contract_id: str) -> list[dict]:
     )
 
 
+def _proposer_side(change_row: dict) -> str | None:
+    proposer = fetch_one(
+        "SELECT side FROM stakeholders WHERE stakeholder_id = ?", [change_row["requested_by"]]
+    )
+    return proposer["side"] if proposer else None
+
+
 def review_change(change_id: str, accept: bool, actor: Actor) -> None:
-    require_role(actor, {ROLE_APPROVER, ROLE_ADMIN}, "Review change requests")
     row = fetch_one("SELECT * FROM change_requests WHERE change_id = ?", [change_id])
     if row is None:
         raise DomainError("Change request not found.")
     require_not_frozen(get_contract(row["contract_id"]), "Review change")
     if row["status"] != CHANGE_PENDING:
         raise DomainError(f"Change request status is {row['status']}; only PENDING requests can be reviewed.")
+    if not can_review_change_for(actor, _proposer_side(row)):
+        raise DomainError("Only the opposite party (the other side) can review and accept this change.")
     new_status = CHANGE_APPROVED if accept else CHANGE_REJECTED
     event = E_CHANGE_APPROVED if accept else E_CHANGE_REJECTED
     with tx() as con:
@@ -187,12 +193,13 @@ def review_change(change_id: str, accept: bool, actor: Actor) -> None:
 
 def merge_change(change_id: str, actor: Actor) -> int:
     """Apply an approved change to the section and bump the contract version."""
-    require_role(actor, {ROLE_APPROVER, ROLE_ADMIN}, "Merge change")
     row = fetch_one("SELECT * FROM change_requests WHERE change_id = ?", [change_id])
     if row is None:
         raise DomainError("Change request not found.")
     contract = get_contract(row["contract_id"])
     require_not_frozen(contract, "Merge change")
+    if not can_review_change_for(actor, _proposer_side(row)):
+        raise DomainError("Only the opposite party (the other side) can merge this change.")
     if row["status"] != CHANGE_APPROVED:
         raise DomainError(f"Only APPROVED changes can be merged; current status is {row['status']}.")
     section = fetch_one("SELECT * FROM sections WHERE section_id = ?", [row["section_id"]])

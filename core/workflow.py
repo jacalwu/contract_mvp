@@ -8,7 +8,11 @@ from core.constants import (
     CLARIFICATION_OPEN,
     CONTRACT_STATUSES,
     PENDING_APPROVAL,
+    ROLE_ADMIN,
+    ROLE_STAKEHOLDER,
     ROLES,
+    SIDE_BUYER,
+    SIDE_VENDOR,
     UNMERGED_CHANGE_STATUSES,
     Actor,
     DomainError,
@@ -65,6 +69,22 @@ def require_role(actor: Actor, allowed: Iterable[str], action: str) -> None:
         raise DomainError(f"Permission denied: {actor.name} ({actor.role}) cannot {action}.")
 
 
+def can_review_change_for(actor: Actor, proposer_side: str | None) -> bool:
+    """Cross-side rule for track-changes.
+
+    A tracked change is reviewed and merged by the *opposite* party. The Admin is
+    the neutral operator and may act on either side; a change proposed by the Admin
+    (no side) may be reviewed by any participant.
+    """
+    if actor.role == ROLE_ADMIN:
+        return True
+    if actor.role != ROLE_STAKEHOLDER or actor.side is None:
+        return False
+    if proposer_side is None:
+        return True
+    return actor.side != proposer_side
+
+
 def _set_status(con, contract: dict, new_status: str, actor: Actor, event_type: str, target_id=None) -> None:
     if new_status not in CONTRACT_STATUSES:
         raise DomainError(f"Invalid status: {new_status}")
@@ -98,13 +118,16 @@ def approval_gate(contract_id: str) -> dict:
         [contract_id, *UNMERGED_CHANGE_STATUSES],
     )
     approvals = fetch_all(
-        """SELECT a.*, s.name AS stakeholder_name, s.email, s.role
+        """SELECT a.*, s.name AS stakeholder_name, s.email, s.role, s.side
            FROM approvals a JOIN stakeholders s ON s.stakeholder_id = a.stakeholder_id
            WHERE a.contract_id = ? ORDER BY a.created_at, s.email""",
         [contract_id],
     )
-    pending = [row for row in approvals if row["status"] != APPROVAL_APPROVED]
-    all_approved = bool(approvals) and not pending
+    buyer_approvals = [row for row in approvals if row["side"] == SIDE_BUYER]
+    vendor_approvals = [row for row in approvals if row["side"] == SIDE_VENDOR]
+    buyer_ok = bool(buyer_approvals) and any(row["status"] == APPROVAL_APPROVED for row in buyer_approvals)
+    vendor_ok = bool(vendor_approvals) and any(row["status"] == APPROVAL_APPROVED for row in vendor_approvals)
+    both_sides_ok = buyer_ok and vendor_ok
     conditions = [
         {
             "key": "clarifications",
@@ -120,16 +143,22 @@ def approval_gate(contract_id: str) -> dict:
         },
         {
             "key": "approvals",
-            "label": "All stakeholders approved",
-            "ok": all_approved,
-            "detail": f"{len(approvals) - len(pending)}/{len(approvals)} approved",
+            "label": "Each side has an approval (≥1 Buyer & ≥1 Vendor)",
+            "ok": both_sides_ok,
+            "detail": (
+                f"Buyer {sum(1 for r in buyer_approvals if r['status'] == APPROVAL_APPROVED)}/"
+                f"{len(buyer_approvals)} · Vendor "
+                f"{sum(1 for r in vendor_approvals if r['status'] == APPROVAL_APPROVED)}/{len(vendor_approvals)}"
+            ),
         },
     ]
     return {
         "approvals": approvals,
         "open_clarifications": open_clarifications,
         "unmerged_changes": unmerged_changes,
-        "all_approved": all_approved,
+        "buyer_approvals": buyer_approvals,
+        "vendor_approvals": vendor_approvals,
+        "both_sides_ok": both_sides_ok,
         "ready": all(condition["ok"] for condition in conditions),
         "conditions": conditions,
     }
